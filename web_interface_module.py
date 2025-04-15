@@ -1,14 +1,39 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app
+from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, session, g
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 import os
 import json
+import sqlite3
 from datetime import datetime
+import hashlib
+import secrets
+from functools import wraps
 
 # Create blueprint
 web_bp = Blueprint('web', __name__, url_prefix='')
+login_manager = LoginManager()
+
+# User class for Flask-Login
+class User(UserMixin):
+    def __init__(self, id, username, email, role):
+        self.id = id
+        self.username = username
+        self.email = email
+        self.role = role
 
 def init_app(app):
     """Initialize the web interface module with the Flask app"""
     app.register_blueprint(web_bp)
+    
+    # Initialize Flask-Login
+    login_manager.init_app(app)
+    login_manager.login_view = 'web.login'
+    login_manager.login_message = 'Please log in to access this page.'
+    login_manager.login_message_category = 'info'
+    
+    # User loader function for Flask-Login
+    @login_manager.user_loader
+    def load_user(user_id):
+        return get_user_by_id(user_id)
     
     # Register context processors to make configuration available in templates
     @app.context_processor
@@ -31,7 +56,8 @@ def init_app(app):
                 'data_export': current_app.config['ENABLE_DATA_EXPORT'],
                 'visualization': current_app.config['ENABLE_VISUALIZATION']
             },
-            'year': datetime.now().year
+            'year': datetime.now().year,
+            'user': current_user if not current_user.is_anonymous else None
         }
 
     # Register template filters
@@ -59,6 +85,157 @@ def init_app(app):
             return value.strftime('%Y-%m-%d %H:%M:%S')
         return value
 
+# Database schema related functions
+def create_database_schema(cursor):
+    """Create the necessary database tables for the web interface module"""
+    # Create users table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        email TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        role TEXT DEFAULT 'analyst',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_login TIMESTAMP
+    )
+    ''')
+    
+    # Create user_settings table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS user_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        setting_key TEXT NOT NULL,
+        setting_value TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        UNIQUE(user_id, setting_key)
+    )
+    ''')
+    
+    # Create an admin user if no users exist
+    cursor.execute("SELECT COUNT(*) FROM users")
+    count = cursor.fetchone()[0]
+    
+    if count == 0:
+        # Create default admin user
+        salt = secrets.token_hex(8)
+        password_hash = hashlib.sha256(f"admin123{salt}".encode()).hexdigest()
+        
+        cursor.execute(
+            "INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, ?)",
+            ("admin", "admin@threathunting.local", f"{salt}:{password_hash}", "admin")
+        )
+
+# Helper function for DB connections
+def _db_connection(row_factory=None):
+    """Create a database connection with optional row factory"""
+    conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
+    if row_factory:
+        conn.row_factory = row_factory
+    return conn
+
+# User functions
+def get_user_by_id(user_id):
+    """Get a user by ID"""
+    conn = _db_connection(sqlite3.Row)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user_data = cursor.fetchone()
+    
+    conn.close()
+    
+    if user_data:
+        user = User(
+            id=user_data['id'],
+            username=user_data['username'],
+            email=user_data['email'],
+            role=user_data['role']
+        )
+        return user
+    return None
+
+def get_user_by_username(username):
+    """Get a user by username"""
+    conn = _db_connection(sqlite3.Row)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+    user_data = cursor.fetchone()
+    
+    conn.close()
+    
+    return dict(user_data) if user_data else None
+
+def validate_login(username, password):
+    """Validate user login credentials"""
+    user_data = get_user_by_username(username)
+    if not user_data:
+        return None
+    
+    # Extract salt and stored hash
+    stored_password = user_data['password']
+    if ':' not in stored_password:
+        return None  # Invalid password format
+    
+    salt, stored_hash = stored_password.split(':', 1)
+    
+    # Compute hash with provided password and stored salt
+    computed_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
+    
+    if computed_hash == stored_hash:
+        # Update last login time
+        conn = _db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET last_login = datetime('now') WHERE id = ?", 
+            (user_data['id'],)
+        )
+        conn.commit()
+        conn.close()
+        
+        return User(
+            id=user_data['id'],
+            username=user_data['username'],
+            email=user_data['email'],
+            role=user_data['role']
+        )
+    return None
+
+def create_user(username, email, password, role='analyst'):
+    """Create a new user account"""
+    salt = secrets.token_hex(8)
+    password_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
+    
+    conn = _db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            "INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, ?)",
+            (username, email, f"{salt}:{password_hash}", role)
+        )
+        conn.commit()
+        user_id = cursor.lastrowid
+        conn.close()
+        return user_id
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        return None
+
+# Role-based access control
+def admin_required(f):
+    """Decorator for views that require admin access"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if current_user.is_anonymous or current_user.role != 'admin':
+            flash('Admin privileges required to access this page.', 'warning')
+            return redirect(url_for('web.index'))
+        return f(*args, **kwargs)
+    return decorated_function
+
 # Basic routes
 @web_bp.route('/')
 def index():
@@ -66,9 +243,38 @@ def index():
     return render_template('index.html')
 
 @web_bp.route('/dashboard')
+@login_required
 def dashboard():
     """Dashboard page"""
-    return render_template('dashboard.html')
+    # Get user-specific data for dashboard
+    user_datasets = []
+    user_analyses = []
+    user_visualizations = []
+    
+    try:
+        # Get user's datasets
+        from data_module import get_datasets
+        all_datasets = get_datasets()
+        user_datasets = all_datasets[:3]  # Just showing 3 most recent for demo
+        
+        # Get user's analyses
+        from analysis_module import get_saved_queries
+        all_queries = get_saved_queries()
+        user_analyses = all_queries[:3]  # Just showing 3 most recent for demo
+        
+        # Get user's visualizations
+        from viz_module import get_visualizations
+        all_visualizations = get_visualizations()
+        user_visualizations = all_visualizations[:3]  # Just showing 3 most recent for demo
+    except Exception as e:
+        flash(f"Error loading dashboard data: {str(e)}", "error")
+    
+    return render_template(
+        'dashboard.html',
+        datasets=user_datasets,
+        analyses=user_analyses,
+        visualizations=user_visualizations
+    )
 
 @web_bp.route('/about')
 def about():
@@ -79,6 +285,93 @@ def about():
 def health():
     """Health check endpoint for Render"""
     return {'status': 'ok', 'timestamp': datetime.now().isoformat()}
+
+# Authentication routes
+@web_bp.route('/login', methods=['GET', 'POST'])
+def login():
+    """User login form and handler"""
+    if current_user.is_authenticated:
+        return redirect(url_for('web.dashboard'))
+    
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        remember = 'remember' in request.form
+        
+        user = validate_login(username, password)
+        
+        if user:
+            login_user(user, remember=remember)
+            flash('Login successful!', 'success')
+            
+            # Redirect to requested page or dashboard
+            next_page = request.args.get('next')
+            if next_page and next_page.startswith('/'):  # Ensure URL is relative
+                return redirect(next_page)
+            return redirect(url_for('web.dashboard'))
+        else:
+            flash('Invalid username or password', 'danger')
+    
+    return render_template('login.html')
+
+@web_bp.route('/logout')
+@login_required
+def logout():
+    """User logout handler"""
+    logout_user()
+    flash('You have been logged out', 'info')
+    return redirect(url_for('web.index'))
+
+@web_bp.route('/register', methods=['GET', 'POST'])
+def register():
+    """User registration form and handler"""
+    if current_user.is_authenticated:
+        return redirect(url_for('web.dashboard'))
+    
+    if request.method == 'POST':
+        username = request.form.get('username')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        password_confirm = request.form.get('password_confirm')
+        
+        # Basic validation
+        if len(username) < 3:
+            flash('Username must be at least 3 characters', 'danger')
+        elif len(password) < 6:
+            flash('Password must be at least 6 characters', 'danger')
+        elif password != password_confirm:
+            flash('Passwords do not match', 'danger')
+        else:
+            # Create new user
+            user_id = create_user(username, email, password)
+            
+            if user_id:
+                flash('Account created successfully! You can now log in.', 'success')
+                return redirect(url_for('web.login'))
+            else:
+                flash('Username or email already exists', 'danger')
+    
+    return render_template('register.html')
+
+@web_bp.route('/profile')
+@login_required
+def profile():
+    """User profile page"""
+    return render_template('profile.html')
+
+@web_bp.route('/admin')
+@login_required
+@admin_required
+def admin():
+    """Admin dashboard"""
+    # Get all users
+    conn = _db_connection(sqlite3.Row)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users ORDER BY created_at DESC")
+    users = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return render_template('admin.html', users=users)
 
 # Error handlers
 def handle_404():
@@ -180,6 +473,50 @@ def generate_css():
         margin-top: 3rem;
     }
     
+    /* Auth forms */
+    .auth-card {
+        max-width: 500px;
+        margin: 2rem auto;
+    }
+    
+    .auth-header {
+        text-align: center;
+        margin-bottom: 1.5rem;
+    }
+    
+    .auth-header i {
+        font-size: 3rem;
+        color: var(--primary-color);
+        margin-bottom: 1rem;
+        display: block;
+    }
+    
+    .auth-footer {
+        text-align: center;
+        margin-top: 1rem;
+    }
+    
+    /* User profile */
+    .profile-header {
+        background-color: var(--primary-color);
+        color: white;
+        padding: 2rem 0;
+        margin-bottom: 2rem;
+    }
+    
+    .profile-avatar {
+        width: 120px;
+        height: 120px;
+        border-radius: 50%;
+        background-color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 1rem;
+        font-size: 3rem;
+        color: var(--primary-color);
+    }
+    
     /* Dashboard specific styles */
     .stats-card {
         text-align: center;
@@ -233,6 +570,14 @@ def generate_css():
     .sidebar .nav-link.active {
         background-color: var(--primary-color);
         color: white;
+    }
+    
+    /* User badge in navbar */
+    .user-badge {
+        background-color: rgba(255,255,255,0.2);
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.25rem;
+        margin-left: 0.5rem;
     }
     
     /* Responsive adjustments */
@@ -293,7 +638,57 @@ def generate_js():
                 }, 1000);
             }, 5000); // 5 seconds
         });
+        
+        // Password strength indicator
+        const passwordInput = document.getElementById('password');
+        const passwordStrength = document.getElementById('password-strength');
+        
+        if (passwordInput && passwordStrength) {
+            passwordInput.addEventListener('input', function() {
+                const strength = checkPasswordStrength(this.value);
+                
+                passwordStrength.className = 'password-strength';
+                if (strength === 'weak') {
+                    passwordStrength.classList.add('weak');
+                    passwordStrength.textContent = 'Weak';
+                } else if (strength === 'medium') {
+                    passwordStrength.classList.add('medium');
+                    passwordStrength.textContent = 'Medium';
+                } else {
+                    passwordStrength.classList.add('strong');
+                    passwordStrength.textContent = 'Strong';
+                }
+            });
+        }
     });
+    
+    // Password strength checker
+    function checkPasswordStrength(password) {
+        if (password.length < 6) {
+            return 'weak';
+        }
+        
+        let score = 0;
+        
+        // Has uppercase letter
+        if (/[A-Z]/.test(password)) score++;
+        
+        // Has lowercase letter
+        if (/[a-z]/.test(password)) score++;
+        
+        // Has number
+        if (/[0-9]/.test(password)) score++;
+        
+        // Has special character
+        if (/[^A-Za-z0-9]/.test(password)) score++;
+        
+        // Length > 10
+        if (password.length > 10) score++;
+        
+        if (score >= 4) return 'strong';
+        if (score >= 2) return 'medium';
+        return 'weak';
+    }
     
     // Handle sidebar toggle on mobile
     function toggleSidebar() {
@@ -328,7 +723,7 @@ def generate_base_templates():
         <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
         <link href="{{ url_for('static', filename='css/data_module.css') }}" rel="stylesheet">
         <link href="{{ url_for('static', filename='css/analysis_module.css') }}" rel="stylesheet">
-        <link href="{{ url_for('static', filename='css/visualization_module.css') }}" rel="stylesheet">
+        <link href="{{ url_for('static', filename='css/viz_module.css') }}" rel="stylesheet">
         
         {% block styles %}{% endblock %}
     </head>
@@ -349,6 +744,7 @@ def generate_base_templates():
                                 <i class="fas fa-home me-1"></i>Home
                             </a>
                         </li>
+                        {% if current_user.is_authenticated %}
                         <li class="nav-item">
                             <a class="nav-link" href="{{ url_for('web.dashboard') }}">
                                 <i class="fas fa-tachometer-alt me-1"></i>Dashboard
@@ -365,15 +761,48 @@ def generate_base_templates():
                             </a>
                         </li>
                         <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('visualization.index') }}">
+                            <a class="nav-link" href="{{ url_for('viz.index') }}">
                                 <i class="fas fa-chart-bar me-1"></i>Visualization
                             </a>
                         </li>
+                        {% endif %}
                         <li class="nav-item">
                             <a class="nav-link" href="{{ url_for('web.about') }}">
                                 <i class="fas fa-info-circle me-1"></i>About
                             </a>
                         </li>
+                    </ul>
+                    
+                    <ul class="navbar-nav">
+                        {% if current_user.is_authenticated %}
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                                <i class="fas fa-user-circle me-1"></i>{{ current_user.username }}
+                                {% if current_user.role == 'admin' %}
+                                <span class="user-badge">Admin</span>
+                                {% endif %}
+                            </a>
+                            <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userDropdown">
+                                <li><a class="dropdown-item" href="{{ url_for('web.profile') }}"><i class="fas fa-id-card me-2"></i>Profile</a></li>
+                                {% if current_user.role == 'admin' %}
+                                <li><a class="dropdown-item" href="{{ url_for('web.admin') }}"><i class="fas fa-users-cog me-2"></i>Admin</a></li>
+                                {% endif %}
+                                <li><hr class="dropdown-divider"></li>
+                                <li><a class="dropdown-item" href="{{ url_for('web.logout') }}"><i class="fas fa-sign-out-alt me-2"></i>Logout</a></li>
+                            </ul>
+                        </li>
+                        {% else %}
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('web.login') }}">
+                                <i class="fas fa-sign-in-alt me-1"></i>Login
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('web.register') }}">
+                                <i class="fas fa-user-plus me-1"></i>Register
+                            </a>
+                        </li>
+                        {% endif %}
                     </ul>
                 </div>
             </div>
@@ -396,9 +825,11 @@ def generate_base_templates():
                         <h5>Navigation</h5>
                         <ul class="list-unstyled">
                             <li><a href="{{ url_for('web.index') }}" class="text-white">Home</a></li>
+                            {% if current_user.is_authenticated %}
                             <li><a href="{{ url_for('data.index') }}" class="text-white">Data</a></li>
                             <li><a href="{{ url_for('analysis.index') }}" class="text-white">Analysis</a></li>
-                            <li><a href="{{ url_for('visualization.index') }}" class="text-white">Visualization</a></li>
+                            <li><a href="{{ url_for('viz.index') }}" class="text-white">Visualization</a></li>
+                            {% endif %}
                         </ul>
                     </div>
                     <div class="col-md-3">
@@ -428,117 +859,62 @@ def generate_base_templates():
     </html>
     """
     
-    # Index/home page template
-    index_html = """
+    # Login page template
+    login_html = """
     {% extends 'base.html' %}
     
-    {% block title %}Home - {{ app_name }}{% endblock %}
+    {% block title %}Login - {{ app_name }}{% endblock %}
     
     {% block content %}
     <div class="container">
-        <div class="row align-items-center mb-5">
-            <div class="col-md-6">
-                <h1 class="display-4 fw-bold">Welcome to {{ app_name }}</h1>
-                <p class="lead">A comprehensive platform for security analysts to craft and test hunt hypotheses against sample datasets.</p>
-                <div class="d-grid gap-2 d-md-flex justify-content-md-start mt-4">
-                    <a href="{{ url_for('data.upload') }}" class="btn btn-primary btn-lg px-4 me-md-2">
-                        <i class="fas fa-upload me-2"></i>Upload Data
-                    </a>
-                    <a href="{{ url_for('web.dashboard') }}" class="btn btn-outline-secondary btn-lg px-4">
-                        <i class="fas fa-tachometer-alt me-2"></i>Dashboard
-                    </a>
+        <div class="card auth-card">
+            <div class="card-body">
+                <div class="auth-header">
+                    <i class="fas fa-sign-in-alt"></i>
+                    <h2>Login</h2>
+                    <p class="text-muted">Enter your credentials to access your account</p>
                 </div>
-            </div>
-            <div class="col-md-6 text-center">
-                <i class="fas fa-shield-alt" style="font-size: 10rem; color: var(--primary-color); opacity: 0.8;"></i>
-            </div>
-        </div>
-        
-        <hr class="my-5">
-        
-        <div class="row mb-5">
-            <div class="col-12 text-center mb-4">
-                <h2>Key Features</h2>
-                <p class="lead">Discover the powerful tools at your disposal</p>
-            </div>
-            
-            <div class="col-md-4 mb-4">
-                <div class="card h-100">
-                    <div class="card-body text-center">
-                        <i class="fas fa-database mb-3" style="font-size: 3rem; color: var(--primary-color);"></i>
-                        <h3 class="card-title">Data Management</h3>
-                        <p class="card-text">Upload, preprocess, and manage various dataset formats including CSV, JSON, and Excel files.</p>
-                        <a href="{{ url_for('data.index') }}" class="btn btn-outline-primary">Explore Data</a>
+                
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                  {% if messages %}
+                    {% for category, message in messages %}
+                      <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                      </div>
+                    {% endfor %}
+                  {% endif %}
+                {% endwith %}
+                
+                <form method="POST" action="{{ url_for('web.login') }}">
+                    <div class="mb-3">
+                        <label for="username" class="form-label">Username</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="fas fa-user"></i></span>
+                            <input type="text" class="form-control" id="username" name="username" required>
+                        </div>
                     </div>
-                </div>
-            </div>
-            
-            <div class="col-md-4 mb-4">
-                <div class="card h-100">
-                    <div class="card-body text-center">
-                        <i class="fas fa-search mb-3" style="font-size: 3rem; color: var(--primary-color);"></i>
-                        <h3 class="card-title">Analysis Tools</h3>
-                        <p class="card-text">Create custom queries, analyze patterns, and develop hunt hypotheses for threat detection.</p>
-                        <a href="{{ url_for('analysis.index') }}" class="btn btn-outline-primary">Start Analysis</a>
+                    
+                    <div class="mb-3">
+                        <label for="password" class="form-label">Password</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="fas fa-lock"></i></span>
+                            <input type="password" class="form-control" id="password" name="password" required>
+                        </div>
                     </div>
-                </div>
-            </div>
-            
-            <div class="col-md-4 mb-4">
-                <div class="card h-100">
-                    <div class="card-body text-center">
-                        <i class="fas fa-chart-bar mb-3" style="font-size: 3rem; color: var(--primary-color);"></i>
-                        <h3 class="card-title">Visualization</h3>
-                        <p class="card-text">Transform data into insightful visualizations and reports to identify threats and anomalies.</p>
-                        <a href="{{ url_for('visualization.index') }}" class="btn btn-outline-primary">View Visualizations</a>
+                    
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="remember" name="remember">
+                        <label class="form-check-label" for="remember">Remember me</label>
                     </div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="row mt-5">
-            <div class="col-12 text-center">
-                <h2>Get Started Today</h2>
-                <p class="lead">Begin your threat hunting journey with these simple steps</p>
-            </div>
-            
-            <div class="col-md-3 text-center mt-4">
-                <div class="p-3">
-                    <div class="bg-primary rounded-circle d-inline-flex justify-content-center align-items-center" style="width: 60px; height: 60px;">
-                        <span class="text-white fw-bold">1</span>
+                    
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">Login</button>
                     </div>
-                    <h4 class="mt-3">Upload Data</h4>
-                    <p>Import your security datasets in various formats</p>
-                </div>
-            </div>
-            
-            <div class="col-md-3 text-center mt-4">
-                <div class="p-3">
-                    <div class="bg-primary rounded-circle d-inline-flex justify-content-center align-items-center" style="width: 60px; height: 60px;">
-                        <span class="text-white fw-bold">2</span>
-                    </div>
-                    <h4 class="mt-3">Create Analysis</h4>
-                    <p>Develop queries and analysis rules</p>
-                </div>
-            </div>
-            
-            <div class="col-md-3 text-center mt-4">
-                <div class="p-3">
-                    <div class="bg-primary rounded-circle d-inline-flex justify-content-center align-items-center" style="width: 60px; height: 60px;">
-                        <span class="text-white fw-bold">3</span>
-                    </div>
-                    <h4 class="mt-3">Visualize Results</h4>
-                    <p>Generate insightful charts and graphs</p>
-                </div>
-            </div>
-            
-            <div class="col-md-3 text-center mt-4">
-                <div class="p-3">
-                    <div class="bg-primary rounded-circle d-inline-flex justify-content-center align-items-center" style="width: 60px; height: 60px;">
-                        <span class="text-white fw-bold">4</span>
-                    </div>
-                    <h4 class="mt-3">Export Findings</h4>
-                    <p>Share and export your threat hunting results</p>
+                </form>
+                
+                <div class="auth-footer">
+                    <p>Don't have an account? <a href="{{ url_for('web.register') }}">Register</a></p>
                 </div>
             </div>
         </div>
@@ -546,15 +922,221 @@ def generate_base_templates():
     {% endblock %}
     """
     
-    # Dashboard template
-    dashboard_html = """
+    # Register page template
+    register_html = """
     {% extends 'base.html' %}
     
-    {% block title %}Dashboard - {{ app_name }}{% endblock %}
+    {% block title %}Register - {{ app_name }}{% endblock %}
     
     {% block content %}
     <div class="container">
-        <h1 class="mb-4">Dashboard</h1>
+        <div class="card auth-card">
+            <div class="card-body">
+                <div class="auth-header">
+                    <i class="fas fa-user-plus"></i>
+                    <h2>Create Account</h2>
+                    <p class="text-muted">Join the {{ app_name }} platform</p>
+                </div>
+                
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                  {% if messages %}
+                    {% for category, message in messages %}
+                      <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                      </div>
+                    {% endfor %}
+                  {% endif %}
+                {% endwith %}
+                
+                <form method="POST" action="{{ url_for('web.register') }}">
+                    <div class="mb-3">
+                        <label for="username" class="form-label">Username</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="fas fa-user"></i></span>
+                            <input type="text" class="form-control" id="username" name="username" required>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="email" class="form-label">Email</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="fas fa-envelope"></i></span>
+                            <input type="email" class="form-control" id="email" name="email" required>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="password" class="form-label">Password</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="fas fa-lock"></i></span>
+                            <input type="password" class="form-control" id="password" name="password" required>
+                        </div>
+                        <div id="password-strength" class="form-text"></div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="password_confirm" class="form-label">Confirm Password</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="fas fa-lock"></i></span>
+                            <input type="password" class="form-control" id="password_confirm" name="password_confirm" required>
+                        </div>
+                    </div>
+                    
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">Register</button>
+                    </div>
+                </form>
+                
+                <div class="auth-footer">
+                    <p>Already have an account? <a href="{{ url_for('web.login') }}">Login</a></p>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endblock %}
+    
+    {% block scripts %}
+    <style>
+        .password-strength {
+            margin-top: 0.5rem;
+            font-weight: bold;
+        }
+        .password-strength.weak { color: var(--danger-color); }
+        .password-strength.medium { color: var(--warning-color); }
+        .password-strength.strong { color: var(--success-color); }
+    </style>
+    {% endblock %}
+    """
+    
+    # Profile page template
+    profile_html = """
+    {% extends 'base.html' %}
+    
+    {% block title %}My Profile - {{ app_name }}{% endblock %}
+    
+    {% block content %}
+    <div class="profile-header">
+        <div class="container text-center">
+            <div class="profile-avatar">
+                <i class="fas fa-user"></i>
+            </div>
+            <h2>{{ current_user.username }}</h2>
+            <p class="lead">{{ current_user.email }}</p>
+            <p>
+                <span class="badge bg-info">{{ current_user.role|title }}</span>
+            </p>
+        </div>
+    </div>
+    
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, message in messages %}
+              <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+              </div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+        
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h4 class="mb-0">Account Information</h4>
+                    </div>
+                    <div class="card-body">
+                        <form method="POST" action="#">
+                            <div class="mb-3">
+                                <label for="username" class="form-label">Username</label>
+                                <input type="text" class="form-control" id="username" value="{{ current_user.username }}" readonly>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="email" class="form-label">Email</label>
+                                <input type="email" class="form-control" id="email" value="{{ current_user.email }}">
+                            </div>
+                            
+                            <button type="submit" class="btn btn-primary">Update Profile</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h4 class="mb-0">Change Password</h4>
+                    </div>
+                    <div class="card-body">
+                        <form method="POST" action="#">
+                            <div class="mb-3">
+                                <label for="current_password" class="form-label">Current Password</label>
+                                <input type="password" class="form-control" id="current_password" name="current_password" required>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="new_password" class="form-label">New Password</label>
+                                <input type="password" class="form-control" id="new_password" name="new_password" required>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="confirm_password" class="form-label">Confirm New Password</label>
+                                <input type="password" class="form-control" id="confirm_password" name="confirm_password" required>
+                            </div>
+                            
+                            <button type="submit" class="btn btn-primary">Change Password</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4 class="mb-0">Activity Summary</h4>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-md-4">
+                        <div class="p-3">
+                            <i class="fas fa-database fa-2x mb-2 text-primary"></i>
+                            <h4>5</h4>
+                            <p class="text-muted">Datasets</p>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="p-3">
+                            <i class="fas fa-search fa-2x mb-2 text-primary"></i>
+                            <h4>12</h4>
+                            <p class="text-muted">Analyses</p>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="p-3">
+                            <i class="fas fa-chart-bar fa-2x mb-2 text-primary"></i>
+                            <h4>8</h4>
+                            <p class="text-muted">Visualizations</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endblock %}
+    """
+    
+    # Admin page template
+    admin_html = """
+    {% extends 'base.html' %}
+    
+    {% block title %}Admin Dashboard - {{ app_name }}{% endblock %}
+    
+    {% block content %}
+    <div class="container">
+        <h1 class="mb-4">Admin Dashboard</h1>
         
         {% with messages = get_flashed_messages(with_categories=true) %}
           {% if messages %}
@@ -569,39 +1151,87 @@ def generate_base_templates():
         
         <div class="row mb-4">
             <div class="col-md-3">
-                <div class="card stats-card">
-                    <div class="stats-icon">
-                        <i class="fas fa-database"></i>
+                <div class="card text-center p-3">
+                    <div class="p-3 mb-2">
+                        <i class="fas fa-users fa-3x text-primary"></i>
                     </div>
-                    <div class="stats-number" id="dataset-count">-</div>
-                    <div class="stats-title">Datasets</div>
+                    <h4>{{ users|length }}</h4>
+                    <p class="text-muted">Total Users</p>
                 </div>
             </div>
             <div class="col-md-3">
-                <div class="card stats-card">
-                    <div class="stats-icon">
-                        <i class="fas fa-search"></i>
+                <div class="card text-center p-3">
+                    <div class="p-3 mb-2">
+                        <i class="fas fa-database fa-3x text-primary"></i>
                     </div>
-                    <div class="stats-number" id="analysis-count">-</div>
-                    <div class="stats-title">Analyses</div>
+                    <h4>10</h4>
+                    <p class="text-muted">Total Datasets</p>
                 </div>
             </div>
             <div class="col-md-3">
-                <div class="card stats-card">
-                    <div class="stats-icon">
-                        <i class="fas fa-chart-bar"></i>
+                <div class="card text-center p-3">
+                    <div class="p-3 mb-2">
+                        <i class="fas fa-search fa-3x text-primary"></i>
                     </div>
-                    <div class="stats-number" id="visualization-count">-</div>
-                    <div class="stats-title">Visualizations</div>
+                    <h4>25</h4>
+                    <p class="text-muted">Total Analyses</p>
                 </div>
             </div>
             <div class="col-md-3">
-                <div class="card stats-card">
-                    <div class="stats-icon">
-                        <i class="fas fa-exclamation-triangle"></i>
+                <div class="card text-center p-3">
+                    <div class="p-3 mb-2">
+                        <i class="fas fa-chart-bar fa-3x text-primary"></i>
                     </div>
-                    <div class="stats-number" id="alert-count">-</div>
-                    <div class="stats-title">Alerts</div>
+                    <h4>18</h4>
+                    <p class="text-muted">Total Visualizations</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h4 class="mb-0">User Management</h4>
+                <button class="btn btn-primary btn-sm">
+                    <i class="fas fa-user-plus"></i> Add User
+                </button>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Username</th>
+                                <th>Email</th>
+                                <th>Role</th>
+                                <th>Created</th>
+                                <th>Last Login</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for user in users %}
+                            <tr>
+                                <td>{{ user.id }}</td>
+                                <td>{{ user.username }}</td>
+                                <td>{{ user.email }}</td>
+                                <td>
+                                    <span class="badge bg-{{ 'danger' if user.role == 'admin' else 'primary' }}">
+                                        {{ user.role }}
+                                    </span>
+                                </td>
+                                <td>{{ user.created_at|format_date }}</td>
+                                <td>{{ user.last_login|format_date if user.last_login else 'Never' }}</td>
+                                <td>
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-primary"><i class="fas fa-edit"></i></button>
+                                        <button class="btn btn-outline-danger"><i class="fas fa-trash"></i></button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -609,294 +1239,73 @@ def generate_base_templates():
         <div class="row">
             <div class="col-md-6">
                 <div class="card mb-4">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0">Recent Activity</h5>
-                        <a href="#" class="btn btn-sm btn-outline-primary">View All</a>
+                    <div class="card-header">
+                        <h4 class="mb-0">System Settings</h4>
                     </div>
                     <div class="card-body">
-                        <div class="list-group list-group-flush" id="recent-activity">
-                            <div class="list-group-item d-flex justify-content-between align-items-center">
-                                <div>
-                                    <div class="fw-bold">Data Upload</div>
-                                    <div class="small text-muted">Windows Event Logs dataset uploaded</div>
-                                </div>
-                                <span class="badge bg-primary rounded-pill">3m ago</span>
+                        <form method="POST" action="#">
+                            <div class="mb-3">
+                                <label for="app_name" class="form-label">Application Name</label>
+                                <input type="text" class="form-control" id="app_name" value="{{ app_name }}">
                             </div>
-                            <div class="list-group-item d-flex justify-content-between align-items-center">
-                                <div>
-                                    <div class="fw-bold">Analysis Created</div>
-                                    <div class="small text-muted">Suspicious Process Analysis created</div>
-                                </div>
-                                <span class="badge bg-primary rounded-pill">15m ago</span>
+                            
+                            <div class="mb-3">
+                                <label for="primary_color" class="form-label">Primary Color</label>
+                                <input type="color" class="form-control form-control-color" id="primary_color" value="{{ colors.primary }}">
                             </div>
-                            <div class="list-group-item d-flex justify-content-between align-items-center">
-                                <div>
-                                    <div class="fw-bold">Visualization Generated</div>
-                                    <div class="small text-muted">Network Traffic Timeline created</div>
-                                </div>
-                                <span class="badge bg-primary rounded-pill">1h ago</span>
+                            
+                            <div class="mb-3 form-check">
+                                <input type="checkbox" class="form-check-input" id="enable_registration" checked>
+                                <label class="form-check-label" for="enable_registration">Enable User Registration</label>
                             </div>
-                        </div>
+                            
+                            <button type="submit" class="btn btn-primary">Save Settings</button>
+                        </form>
                     </div>
                 </div>
             </div>
-            
             <div class="col-md-6">
                 <div class="card mb-4">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0">Recent Datasets</h5>
-                        <a href="{{ url_for('data.index') }}" class="btn btn-sm btn-outline-primary">View All</a>
+                    <div class="card-header">
+                        <h4 class="mb-0">System Information</h4>
                     </div>
                     <div class="card-body">
-                        <div class="list-group list-group-flush" id="recent-datasets">
-                            <!-- Datasets will be loaded via API -->
-                            <div class="text-center py-3">
-                                <div class="spinner-border text-primary" role="status">
-                                    <span class="visually-hidden">Loading...</span>
-                                </div>
-                            </div>
-                        </div>
+                        <dl class="row">
+                            <dt class="col-sm-5">Application Version:</dt>
+                            <dd class="col-sm-7">1.0.0</dd>
+                            
+                            <dt class="col-sm-5">Flask Version:</dt>
+                            <dd class="col-sm-7">2.3.3</dd>
+                            
+                            <dt class="col-sm-5">Python Version:</dt>
+                            <dd class="col-sm-7">3.11.4</dd>
+                            
+                            <dt class="col-sm-5">Database:</dt>
+                            <dd class="col-sm-7">SQLite 3</dd>
+                            
+                            <dt class="col-sm-5">Operating System:</dt>
+                            <dd class="col-sm-7">Linux</dd>
+                            
+                            <dt class="col-sm-5">Server Time:</dt>
+                            <dd class="col-sm-7">{{ now|format_datetime }}</dd>
+                        </dl>
                     </div>
                 </div>
             </div>
-        </div>
-        
-        <div class="row">
-            <div class="col-md-12">
-                <div class="card mb-4">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0">Quick Actions</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="row">
-                            <div class="col-md-3 mb-3">
-                                <a href="{{ url_for('data.upload') }}" class="btn btn-outline-primary w-100 p-3">
-                                    <i class="fas fa-upload mb-2" style="font-size: 2rem;"></i>
-                                    <div>Upload Data</div>
-                                </a>
-                            </div>
-                            <div class="col-md-3 mb-3">
-                                <a href="{{ url_for('analysis.create') }}" class="btn btn-outline-primary w-100 p-3">
-                                    <i class="fas fa-search mb-2" style="font-size: 2rem;"></i>
-                                    <div>New Analysis</div>
-                                </a>
-                            </div>
-                            <div class="col-md-3 mb-3">
-                                <a href="{{ url_for('visualization.create') }}" class="btn btn-outline-primary w-100 p-3">
-                                    <i class="fas fa-chart-line mb-2" style="font-size: 2rem;"></i>
-                                    <div>New Visualization</div>
-                                </a>
-                            </div>
-                            <div class="col-md-3 mb-3">
-                                <a href="#" class="btn btn-outline-primary w-100 p-3">
-                                    <i class="fas fa-file-export mb-2" style="font-size: 2rem;"></i>
-                                    <div>Export Report</div>
-                                </a>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    
-    {% block scripts %}
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            // Load dataset stats
-            fetch('/data/api/datasets')
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('dataset-count').textContent = data.length;
-                    
-                    // Update recent datasets
-                    const recentDatasetsElement = document.getElementById('recent-datasets');
-                    recentDatasetsElement.innerHTML = '';
-                    
-                    if (data.length === 0) {
-                        recentDatasetsElement.innerHTML = '<div class="text-center py-3">No datasets found</div>';
-                    } else {
-                        // Show the most recent 3 datasets
-                        data.slice(0, 3).forEach(dataset => {
-                            const item = document.createElement('div');
-                            item.className = 'list-group-item d-flex justify-content-between align-items-center';
-                            item.innerHTML = `
-                                <div>
-                                    <div class="fw-bold">${dataset.name}</div>
-                                    <div class="small text-muted">${dataset.row_count} records, ${dataset.source_type} format</div>
-                                </div>
-                                <a href="/data/view/${dataset.id}" class="btn btn-sm btn-outline-primary">View</a>
-                            `;
-                            recentDatasetsElement.appendChild(item);
-                        });
-                    }
-                })
-                .catch(error => {
-                    console.error('Error fetching datasets:', error);
-                    document.getElementById('recent-datasets').innerHTML = 
-                        '<div class="text-center py-3">Error loading datasets</div>';
-                });
-            
-            // Placeholder values for other stats - would be replaced with actual API calls
-            document.getElementById('analysis-count').textContent = '3';
-            document.getElementById('visualization-count').textContent = '5';
-            document.getElementById('alert-count').textContent = '2';
-        });
-    </script>
-    {% endblock %}
-    """
-    
-    # About page template
-    about_html = """
-    {% extends 'base.html' %}
-    
-    {% block title %}About - {{ app_name }}{% endblock %}
-    
-    {% block content %}
-    <div class="container">
-        <div class="row">
-            <div class="col-lg-8 offset-lg-2">
-                <h1 class="mb-4">About {{ app_name }}</h1>
-                
-                <div class="card mb-4">
-                    <div class="card-body">
-                        <h2>Overview</h2>
-                        <p>
-                            {{ app_name }} is a comprehensive platform designed for security analysts to craft and test hunt 
-                            hypotheses against various datasets. This tool simplifies the process of identifying threats and 
-                            anomalies in security data through advanced analysis and visualization techniques.
-                        </p>
-                        
-                        <h2 class="mt-4">Key Features</h2>
-                        <ul>
-                            <li>
-                                <strong>Data Management:</strong> Upload, preprocess, and manage various dataset formats 
-                                including CSV, JSON, and Excel files.
-                            </li>
-                            <li>
-                                <strong>Advanced Analysis:</strong> Create custom queries, analyze patterns, and develop 
-                                hunt hypotheses for threat detection.
-                            </li>
-                            <li>
-                                <strong>Visualization:</strong> Transform data into insightful visualizations and reports 
-                                to identify threats and anomalies.
-                            </li>
-                            <li>
-                                <strong>Export Capabilities:</strong> Share and export your threat hunting results in 
-                                various formats.
-                            </li>
-                        </ul>
-                        
-                        <h2 class="mt-4">Technology Stack</h2>
-                        <p>
-                            {{ app_name }} is built using a modern technology stack:
-                        </p>
-                        <ul>
-                            <li><strong>Backend:</strong> Python with Flask framework</li>
-                            <li><strong>Data Processing:</strong> Pandas and NumPy for efficient data manipulation</li>
-                            <li><strong>Analysis:</strong> Scikit-learn for machine learning and pattern detection</li>
-                            <li><strong>Visualization:</strong> Plotly for interactive data visualization</li>
-                            <li><strong>Database:</strong> SQLite for data storage</li>
-                            <li><strong>Frontend:</strong> Bootstrap for responsive design</li>
-                        </ul>
-                        
-                        <h2 class="mt-4">Getting Started</h2>
-                        <p>
-                            To get started with {{ app_name }}, follow these simple steps:
-                        </p>
-                        <ol>
-                            <li>Upload your security dataset via the <a href="{{ url_for('data.upload') }}">Data Upload</a> page.</li>
-                            <li>Create a new analysis to explore the data and develop hunt hypotheses.</li>
-                            <li>Generate visualizations to better understand patterns and anomalies.</li>
-                            <li>Export your findings for reporting or further investigation.</li>
-                        </ol>
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <div class="card-body">
-                        <h2>Contact</h2>
-                        <p>
-                            For questions, feedback, or support requests, please contact us at:
-                        </p>
-                        <p>
-                            <i class="fas fa-envelope me-2"></i> support@threathuntingworkbench.com<br>
-                            <i class="fas fa-globe me-2"></i> www.threathuntingworkbench.com
-                        </p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    """
-    
-    # 404 error page template
-    error_404_html = """
-    {% extends 'base.html' %}
-    
-    {% block title %}Page Not Found - {{ app_name }}{% endblock %}
-    
-    {% block content %}
-    <div class="container text-center py-5">
-        <div class="display-1 text-primary mb-3">
-            <i class="fas fa-exclamation-circle"></i> 404
-        </div>
-        <h1 class="mb-4">Page Not Found</h1>
-        <p class="lead mb-5">Sorry, we couldn't find the page you're looking for.</p>
-        <div class="d-flex justify-content-center">
-            <a href="{{ url_for('web.index') }}" class="btn btn-primary me-3">
-                <i class="fas fa-home me-2"></i>Go to Home
-            </a>
-            <a href="javascript:history.back()" class="btn btn-outline-secondary">
-                <i class="fas fa-arrow-left me-2"></i>Go Back
-            </a>
-        </div>
-    </div>
-    {% endblock %}
-    """
-    
-    # 500 error page template
-    error_500_html = """
-    {% extends 'base.html' %}
-    
-    {% block title %}Server Error - {{ app_name }}{% endblock %}
-    
-    {% block content %}
-    <div class="container text-center py-5">
-        <div class="display-1 text-danger mb-3">
-            <i class="fas fa-exclamation-triangle"></i> 500
-        </div>
-        <h1 class="mb-4">Server Error</h1>
-        <p class="lead mb-5">Sorry, something went wrong on our end. Please try again later.</p>
-        <div class="d-flex justify-content-center">
-            <a href="{{ url_for('web.index') }}" class="btn btn-primary me-3">
-                <i class="fas fa-home me-2"></i>Go to Home
-            </a>
-            <a href="javascript:history.back()" class="btn btn-outline-secondary">
-                <i class="fas fa-arrow-left me-2"></i>Go Back
-            </a>
         </div>
     </div>
     {% endblock %}
     """
     
     # Write the templates to files
-    with open('templates/base.html', 'w') as f:
-        f.write(base_html)
-        
-    with open('templates/index.html', 'w') as f:
-        f.write(index_html)
-        
-    with open('templates/dashboard.html', 'w') as f:
-        f.write(dashboard_html)
-        
-    with open('templates/about.html', 'w') as f:
-        f.write(about_html)
-        
-    with open('templates/404.html', 'w') as f:
-        f.write(error_404_html)
-        
-    with open('templates/500.html', 'w') as f:
-        f.write(error_500_html)
+    templates = {
+        'base.html': base_html,
+        'login.html': login_html,
+        'register.html': register_html,
+        'profile.html': profile_html,
+        'admin.html': admin_html,
+    }
+    
+    for file_name, content in templates.items():
+        with open(f'templates/{file_name}', 'w') as f:
+            f.write(content)
