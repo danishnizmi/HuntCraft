@@ -1,31 +1,27 @@
-# Render deployment configuration for Threat Hunting Workbench
+# Render deployment configuration for HuntCraft
 services:
+  # Main web service for HuntCraft
   - type: web
-    name: threat-hunting-workbench
-    env: python
-    region: oregon
+    name: huntcraft-web
+    runtime: python
     plan: free
-
+    region: oregon
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-      mkdir -p data/uploads
       echo "Build completed successfully"
-
     startCommand: gunicorn "main:create_app()" -b 0.0.0.0:$PORT -w 2 --timeout 120
-
     autoDeploy: true
     healthCheckPath: /health
-
     envVars:
       - key: PYTHON_VERSION
-        value: "3.9.0"   # Always quote version numbers
+        value: "3.9.0"   # Kept your specified Python version
       - key: DEBUG
         value: "false"
       - key: SECRET_KEY
         generateValue: true
       - key: APP_NAME
-        value: "Threat Hunting Workbench"
+        value: "HuntCraft"  # Updated to reflect your project name
       - key: PRIMARY_COLOR
         value: "#4a6fa5"
       - key: SECONDARY_COLOR
@@ -52,23 +48,5 @@ services:
         value: "true"
       - key: LOG_LEVEL
         value: "INFO"
-      - key: DATABASE_PATH
-        value: "/opt/render/project/src/data/threat_hunting.db"
-      - key: UPLOAD_FOLDER
-        value: "/opt/render/project/src/data/uploads"
-
-    disk:
-      name: threat-hunting-data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1
-
-  - type: cron
-    name: cleanup-old-uploads
-    schedule: "0 0 * * *"
-    startCommand: "bash -c 'mkdir -p /opt/render/project/src/data/uploads && find /opt/render/project/src/data/uploads -type f -mtime +30 -delete -exec echo \"Deleted: {}\" \\; 2>> /opt/render/project/src/data/cleanup.log || echo \"Error in cleanup\" >> /opt/render/project/src/data/cleanup.log'"
-    env: python
-    region: oregon
-    plan: free
-    envVars:
-      - key: PYTHON_VERSION
-        value: "3.9.0"
+      - key: RENDER_SERVICE
+        value: "true"
