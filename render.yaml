@@ -1,0 +1,14 @@
+services:
+  # The main web service
+  - type: web
+    name: threat-hunting-workbench
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:create_app() -b 0.0.0.0:$PORT
+    envVars:
+      - key: DEBUG
+        value: False
+      - key: SECRET_KEY
+        generateValue: true
+    healthCheckPath: /health
