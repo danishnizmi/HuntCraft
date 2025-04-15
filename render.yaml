@@ -1,34 +1,27 @@
 # Render deployment configuration for Threat Hunting Workbench
 services:
-  # Main web application service
   - type: web
     name: threat-hunting-workbench
     env: python
     region: oregon
     plan: free
-    
-    # Build configuration
+
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
       mkdir -p data/uploads
       echo "Build completed successfully"
-    
-    # Start command using Gunicorn
+
     startCommand: gunicorn "main:create_app()" -b 0.0.0.0:$PORT -w 2 --timeout 120
-    
-    # Automatic deployments when code is pushed
+
     autoDeploy: true
-    
-    # Healthcheck path to verify service is running
     healthCheckPath: /health
-    
-    # Environment variables
+
     envVars:
       - key: PYTHON_VERSION
-        value: 3.9.0
+        value: "3.9.0"   # Always quote version numbers
       - key: DEBUG
-        value: false
+        value: "false"
       - key: SECRET_KEY
         generateValue: true
       - key: APP_NAME
@@ -50,31 +43,30 @@ services:
       - key: LIGHT_COLOR
         value: "#f8f9fa"
       - key: MAX_UPLOAD_SIZE_MB
-        value: 16
+        value: "16"
       - key: ENABLE_ADVANCED_ANALYSIS
-        value: true
+        value: "true"
       - key: ENABLE_DATA_EXPORT
-        value: true
+        value: "true"
       - key: ENABLE_VISUALIZATION
-        value: true
+        value: "true"
       - key: LOG_LEVEL
-        value: INFO
+        value: "INFO"
       - key: DATABASE_PATH
-        value: /opt/render/project/src/data/threat_hunting.db
+        value: "/opt/render/project/src/data/threat_hunting.db"
       - key: UPLOAD_FOLDER
-        value: /opt/render/project/src/data/uploads
-    
-    # Persistent disk for database and uploaded files
+        value: "/opt/render/project/src/data/uploads"
+
     disk:
       name: threat-hunting-data
       mountPath: /opt/render/project/src/data
       sizeGB: 1
-      
-    # Cron jobs for maintenance (optional)
-    cron:
-      - schedule: "0 0 * * *"  # Daily at midnight
-        command: "find data/uploads -type f -mtime +30 -delete"
-        
-    # Health check parameters
-    healthCheckTimeout: 10
-    healthCheckContents: '{"status": "ok"}'
+
+    cronJobs:
+      - name: cleanup-old-uploads
+        schedule: "0 0 * * *"
+        command: "find /opt/render/project/src/data/uploads -type f -mtime +30 -delete"
+
+    healthCheck:
+      timeout: 10
+      contents: '{"status": "ok"}'
