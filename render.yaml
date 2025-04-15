@@ -65,7 +65,7 @@ services:
   - type: cron
     name: cleanup-old-uploads
     schedule: "0 0 * * *"
-    command: "bash -c 'mkdir -p /opt/render/project/src/data/uploads && find /opt/render/project/src/data/uploads -type f -mtime +30 -delete -exec echo \"Deleted: {}\" \\; 2>> /opt/render/project/src/data/cleanup.log || echo \"Error in cleanup\" >> /opt/render/project/src/data/cleanup.log'"
+    startCommand: "bash -c 'mkdir -p /opt/render/project/src/data/uploads && find /opt/render/project/src/data/uploads -type f -mtime +30 -delete -exec echo \"Deleted: {}\" \\; 2>> /opt/render/project/src/data/cleanup.log || echo \"Error in cleanup\" >> /opt/render/project/src/data/cleanup.log'"
     env: python
     region: oregon
     plan: free
