@@ -1,6 +1,5 @@
-# Render deployment configuration for HuntCraft
+# Render deployment configuration for HuntCraft (Free Tier)
 services:
-  # Main web service for HuntCraft
   - type: web
     name: huntcraft-web
     runtime: python
@@ -15,13 +14,13 @@ services:
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: "3.9.0"   # Kept your specified Python version
+        value: "3.9.0"
       - key: DEBUG
         value: "false"
       - key: SECRET_KEY
         generateValue: true
       - key: APP_NAME
-        value: "HuntCraft"  # Updated to reflect your project name
+        value: "HuntCraft"
       - key: PRIMARY_COLOR
         value: "#4a6fa5"
       - key: SECONDARY_COLOR
@@ -50,3 +49,16 @@ services:
         value: "INFO"
       - key: RENDER_SERVICE
         value: "true"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: huntcraft-db
+          property: connectionString
+
+databases:
+  - name: huntcraft-db
+    plan: free
+    databaseName: huntcraft
+    user: huntcraft_user
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: All services
