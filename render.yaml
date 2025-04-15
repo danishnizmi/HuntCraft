@@ -19,7 +19,7 @@ services:
 
     envVars:
       - key: PYTHON_VERSION
-        value: "3.9.0"
+        value: "3.9.0"   # Always quote version numbers
       - key: DEBUG
         value: "false"
       - key: SECRET_KEY
@@ -62,16 +62,13 @@ services:
       mountPath: /opt/render/project/src/data
       sizeGB: 1
 
-    services:
-      - type: worker
-        name: cleanup-uploads
-        schedule: "0 0 * * *"
-        command: "find /opt/render/project/src/data/uploads -type f -mtime +30 -delete"
-
-    healthCheck:
-      healthyThreshold: 3
-      unhealthyThreshold: 3
-      path: /health
-      timeout: 10
-      interval: 60
-      retries: 3
+  - type: cron
+    name: cleanup-old-uploads
+    schedule: "0 0 * * *"
+    command: "find /opt/render/project/src/data/uploads -type f -mtime +30 -delete"
+    env: python
+    region: oregon
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.9.0"
