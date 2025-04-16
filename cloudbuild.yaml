@@ -1,0 +1,37 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA', '.']
+
+  # Push the image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'malware-detonation-platform'
+      - '--image=gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+
+  # Setup required GCP resources
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud pubsub topics create detonation-notifications || true
+        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications || true
+        gsutil mb -l ${_REGION} gs://malware-samples-$PROJECT_ID || true
+        gsutil mb -l ${_REGION} gs://detonation-results-$PROJECT_ID || true
+
+images:
+  - 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA'
+
+substitutions:
+  _REGION: us-central1
