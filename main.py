@@ -5,12 +5,12 @@ import logging
 import importlib
 from pathlib import Path
 
-# Module configuration - Fixed to use existing module names
+# Module configuration
 MODULES = {
-    'malware': 'malware_module',  # Handles malware samples
-    'detonation': 'detonation_module',  # Handles VM detonation
-    'viz': 'viz_module',  # Visualization module
-    'web': 'web_interface'  # Web interface
+    'malware': 'malware_module',
+    'detonation': 'detonation_module',
+    'viz': 'viz_module',
+    'web': 'web_interface'
 }
 
 def create_app(test_config=None):
@@ -60,11 +60,14 @@ def create_app(test_config=None):
         )
     
     # Setup essential directories
-    _setup_directories(app)
+    for directory in [app.config.get('UPLOAD_FOLDER', '/app/data/uploads'), 'static/css', 
+                     'static/js', 'templates', 
+                     os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db'))]:
+        os.makedirs(directory, exist_ok=True)
     
     # Initialize database
-    from database import init_app
-    init_app(app)
+    from database import init_app as init_db
+    init_db(app)
     
     # Load all modules eagerly at startup
     logger.info("Loading all modules at startup")
@@ -77,7 +80,7 @@ def create_app(test_config=None):
         except ImportError as e:
             logger.error(f"Failed to import module {module_name}: {str(e)}")
     
-    # Ensure we have a minimal index.html
+    # Ensure we have a minimal index.html template
     with app.app_context():
         ensure_index_template(app)
     
@@ -89,11 +92,11 @@ def create_app(test_config=None):
     # Simple error handlers
     @app.errorhandler(404)
     def page_not_found(e):
-        return "Page not found", 404
+        return f"Page not found: {str(e)}", 404
 
     @app.errorhandler(500)
     def server_error(e):
-        return "Server error", 500
+        return f"Server error: {str(e)}", 500
     
     return app
 
@@ -128,20 +131,7 @@ def ensure_index_template(app):
 </html>""")
         logging.getLogger(__name__).info("Created minimal index.html template")
 
-def _setup_directories(app):
-    """Set up essential application directories"""
-    directories = [
-        app.config.get('UPLOAD_FOLDER', '/app/data/uploads'),
-        'static/css',
-        'static/js',
-        'templates',
-        os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db'))
-    ]
-    
-    for directory in directories:
-        os.makedirs(directory, exist_ok=True)
-
 if __name__ == "__main__":
     app = create_app()
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, threaded=False)
+    app.run(host="0.0.0.0", port=port)
