@@ -11,7 +11,7 @@ MODULES = {
     'malware': 'malware_module',  # Handles malware samples
     'detonation': 'detonation_module',  # Handles VM detonation
     'viz': 'viz_module',  # Fixed to use the actual module name (viz_module instead of results_module)
-    'web': 'web_interface_module'  # Web interface
+    'web': 'web_interface'  # Web interface
 }
 
 def create_app(test_config=None):
