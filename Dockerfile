@@ -42,7 +42,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     google-cloud-monitoring==2.15.0 \
     google-cloud-secret-manager==2.16.2 \
     google-cloud-pubsub==2.18.4 \
-    google-auth==2.23.0 \  # Updated to newer version that supports urllib3 2.0+
+    google-auth==2.23.0 \
     google-cloud-functions==1.13.1 \
     # Data processing
     pandas==2.0.3 \
