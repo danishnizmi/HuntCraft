@@ -73,17 +73,11 @@ def init_app(app):
             return value.strftime('%Y-%m-%d')
         return value
 
-    @app.template_filter('format_datetime')
-    def format_datetime(value):
-        """Format a datetime for display"""
-        if isinstance(value, str):
-            try:
-                value = datetime.fromisoformat(value.replace('Z', '+00:00'))
-            except ValueError:
-                return value
-        if isinstance(value, datetime):
-            return value.strftime('%Y-%m-%d %H:%M:%S')
-        return value
+    # Ensure base templates and static resources exist
+    if app.config.get('GENERATE_TEMPLATES', False):
+        generate_base_templates()
+        generate_css()
+        generate_js()
 
 # Database schema related functions
 def create_database_schema(cursor):
@@ -118,14 +112,19 @@ def create_database_schema(cursor):
     count = cursor.fetchone()[0]
     
     if count == 0:
-        # Create default admin user
+        # Create default admin user with more secure random password
+        admin_password = secrets.token_urlsafe(12)  # Generate a secure random password
         salt = secrets.token_hex(8)
-        password_hash = hashlib.sha256(f"admin123{salt}".encode()).hexdigest()
+        password_hash = hashlib.sha256(f"{admin_password}{salt}".encode()).hexdigest()
         
         cursor.execute(
             "INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, ?)",
             ("admin", "admin@threathunting.local", f"{salt}:{password_hash}", "admin")
         )
+        
+        # Log the initial password so it can be retrieved from logs
+        import logging
+        logging.getLogger(__name__).info(f"Created initial admin user with password: {admin_password}")
 
 # Helper function for DB connections
 def _db_connection(row_factory=None):
@@ -245,57 +244,38 @@ def index():
 @web_bp.route('/dashboard')
 @login_required
 def dashboard():
-    """Dashboard page"""
-    # Get user-specific data for dashboard
+    """Dashboard page - with lazy loading of modules"""
+    # Prepare empty data containers
     user_datasets = []
     user_analyses = []
     user_visualizations = []
     
     try:
-        # Try getting datasets from malware_module (new) or data_module (old)
-        try:
-            from malware_module import get_datasets
-            all_datasets = get_datasets()
-            user_datasets = all_datasets[:3]  # Just showing 3 most recent for demo
-        except ImportError:
-            try:
-                from data_module import get_datasets
-                all_datasets = get_datasets()
-                user_datasets = all_datasets[:3]
-            except ImportError:
-                # If neither module is available
-                user_datasets = []
+        # Lazy load modules only when needed
+        from main import get_module
         
-        # Try getting analyses from detonation_module (new) or analysis_module (old)
-        try:
-            from detonation_module import get_saved_queries
-            all_queries = get_saved_queries()
-            user_analyses = all_queries[:3]
-        except (ImportError, AttributeError):
-            try:
-                from analysis_module import get_saved_queries
-                all_queries = get_saved_queries()
-                user_analyses = all_queries[:3]
-            except (ImportError, AttributeError):
-                # If neither module is available or function doesn't exist
-                user_analyses = []
+        # Try getting datasets from malware module
+        malware_module = get_module('malware')
+        if malware_module and hasattr(malware_module, 'get_datasets'):
+            user_datasets = malware_module.get_datasets()
         
-        # Get user's visualizations
-        try:
-            from viz_module import get_visualizations
-            all_visualizations = get_visualizations()
-            user_visualizations = all_visualizations[:3]
-        except (ImportError, AttributeError):
-            # If viz_module is not available or function doesn't exist
-            user_visualizations = []
+        # Try getting analyses from detonation or analysis module
+        detonation_module = get_module('detonation')
+        if detonation_module and hasattr(detonation_module, 'get_saved_queries'):
+            user_analyses = detonation_module.get_saved_queries()
+        
+        # Get visualizations if available
+        viz_module = get_module('viz')
+        if viz_module and hasattr(viz_module, 'get_visualizations_for_dashboard'):
+            user_visualizations = viz_module.get_visualizations_for_dashboard()
     except Exception as e:
-        flash(f"Error loading dashboard data: {str(e)}", "error")
+        flash(f"Some dashboard components could not be loaded", "warning")
     
     return render_template(
         'dashboard.html',
-        datasets=user_datasets,
-        analyses=user_analyses,
-        visualizations=user_visualizations
+        datasets=user_datasets[:5],
+        analyses=user_analyses[:5],
+        visualizations=user_visualizations[:5]
     )
 
 @web_bp.route('/about')
@@ -305,7 +285,7 @@ def about():
 
 @web_bp.route('/health')
 def health():
-    """Health check endpoint for Render"""
+    """Health check endpoint for Cloud Run"""
     return {'status': 'ok', 'timestamp': datetime.now().isoformat()}
 
 # Authentication routes
@@ -386,14 +366,27 @@ def profile():
 @admin_required
 def admin():
     """Admin dashboard"""
-    # Get all users
+    # Get all users - with pagination for efficiency
+    page = request.args.get('page', 1, type=int)
+    page_size = 20
+    offset = (page - 1) * page_size
+    
     conn = _db_connection(sqlite3.Row)
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users ORDER BY created_at DESC")
+    cursor.execute("SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?", 
+                  (page_size, offset))
     users = [dict(row) for row in cursor.fetchall()]
+    
+    # Get total count for pagination
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    
     conn.close()
     
-    return render_template('admin.html', users=users)
+    return render_template('admin.html', 
+                          users=users,
+                          page=page,
+                          total_pages=(total_users + page_size - 1) // page_size)
 
 # Error handlers
 def handle_404():
@@ -404,210 +397,33 @@ def handle_500():
     """Handle 500 errors"""
     return render_template('500.html') if os.path.exists('templates/500.html') else "Server error", 500
 
-# Static file generators
+# Static file generators - only run when explicitly requested
 def generate_css():
     """Generate CSS for the web interface"""
+    # Skip if already exists
+    if os.path.exists('static/css/main.css'):
+        return
+        
     os.makedirs('static/css', exist_ok=True)
     
-    # Main CSS file
+    # Main CSS file - minimal version
     main_css = """
-    /* Main application styling */
+    /* Main application styling - Minimal version */
     :root {
         --primary-color: """ + current_app.config.get('PRIMARY_COLOR', '#4a6fa5') + """;
         --secondary-color: """ + current_app.config.get('SECONDARY_COLOR', '#6c757d') + """;
         --danger-color: """ + current_app.config.get('DANGER_COLOR', '#dc3545') + """;
         --success-color: """ + current_app.config.get('SUCCESS_COLOR', '#28a745') + """;
-        --warning-color: """ + current_app.config.get('WARNING_COLOR', '#ffc107') + """;
-        --info-color: """ + current_app.config.get('INFO_COLOR', '#17a2b8') + """;
-        --dark-color: """ + current_app.config.get('DARK_COLOR', '#343a40') + """;
-        --light-color: """ + current_app.config.get('LIGHT_COLOR', '#f8f9fa') + """;
     }
 
-    body {
-        font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif;
-        color: #333;
-        background-color: #f8f9fa;
-        line-height: 1.6;
-        min-height: 100vh;
-        display: flex;
-        flex-direction: column;
-    }
-    
-    .main-content {
-        flex: 1;
-    }
-    
-    .navbar {
-        background-color: var(--primary-color);
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    
-    .navbar-brand {
-        font-weight: 700;
-        color: white !important;
-    }
-    
-    .navbar-dark .navbar-nav .nav-link {
-        color: rgba(255,255,255,0.8);
-    }
-    
-    .navbar-dark .navbar-nav .nav-link:hover {
-        color: white;
-    }
-    
-    .card {
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        border: none;
-        border-radius: 0.5rem;
-        margin-bottom: 1.5rem;
-    }
-    
-    .card-header {
-        background-color: white;
-        border-bottom: 1px solid #eaeaea;
-        font-weight: 600;
-    }
-    
-    .btn-primary {
-        background-color: var(--primary-color);
-        border-color: var(--primary-color);
-    }
-    
-    .btn-secondary {
-        background-color: var(--secondary-color);
-        border-color: var(--secondary-color);
-    }
-    
-    .btn-danger {
-        background-color: var(--danger-color);
-        border-color: var(--danger-color);
-    }
-    
-    .btn-success {
-        background-color: var(--success-color);
-        border-color: var(--success-color);
-    }
-    
-    .footer {
-        background-color: var(--dark-color);
-        color: white;
-        padding: 2rem 0;
-        margin-top: 3rem;
-    }
-    
-    /* Auth forms */
-    .auth-card {
-        max-width: 500px;
-        margin: 2rem auto;
-    }
-    
-    .auth-header {
-        text-align: center;
-        margin-bottom: 1.5rem;
-    }
-    
-    .auth-header i {
-        font-size: 3rem;
-        color: var(--primary-color);
-        margin-bottom: 1rem;
-        display: block;
-    }
-    
-    .auth-footer {
-        text-align: center;
-        margin-top: 1rem;
-    }
-    
-    /* User profile */
-    .profile-header {
-        background-color: var(--primary-color);
-        color: white;
-        padding: 2rem 0;
-        margin-bottom: 2rem;
-    }
-    
-    .profile-avatar {
-        width: 120px;
-        height: 120px;
-        border-radius: 50%;
-        background-color: white;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        margin: 0 auto 1rem;
-        font-size: 3rem;
-        color: var(--primary-color);
-    }
-    
-    /* Dashboard specific styles */
-    .stats-card {
-        text-align: center;
-        padding: 1.5rem;
-    }
-    
-    .stats-card .stats-icon {
-        font-size: 2.5rem;
-        margin-bottom: 1rem;
-        color: var(--primary-color);
-    }
-    
-    .stats-card .stats-number {
-        font-size: 1.8rem;
-        font-weight: 700;
-        margin-bottom: 0.5rem;
-    }
-    
-    .stats-card .stats-title {
-        color: #6c757d;
-        font-size: 0.9rem;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    
-    /* Sidebar */
-    .sidebar {
-        min-height: calc(100vh - 56px);
-        background-color: var(--dark-color);
-        padding-top: 1rem;
-    }
-    
-    .sidebar .nav-link {
-        color: rgba(255,255,255,0.8);
-        padding: 0.8rem 1rem;
-        display: flex;
-        align-items: center;
-    }
-    
-    .sidebar .nav-link:hover {
-        color: white;
-        background-color: rgba(255,255,255,0.1);
-    }
-    
-    .sidebar .nav-link i {
-        margin-right: 0.5rem;
-        width: 20px;
-        text-align: center;
-    }
-    
-    .sidebar .nav-link.active {
-        background-color: var(--primary-color);
-        color: white;
-    }
-    
-    /* User badge in navbar */
-    .user-badge {
-        background-color: rgba(255,255,255,0.2);
-        padding: 0.25rem 0.5rem;
-        border-radius: 0.25rem;
-        margin-left: 0.5rem;
-    }
-    
-    /* Responsive adjustments */
-    @media (max-width: 768px) {
-        .sidebar {
-            min-height: auto;
-        }
-    }
+    body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #333; background-color: #f8f9fa; line-height: 1.6; }
+    .main-content { flex: 1; }
+    .navbar { background-color: var(--primary-color); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .navbar-brand { font-weight: 700; color: white !important; }
+    .card { box-shadow: 0 2px 4px rgba(0,0,0,0.1); border: none; border-radius: 0.5rem; margin-bottom: 1rem; }
+    .auth-card { max-width: 500px; margin: 2rem auto; }
+    .auth-header { text-align: center; margin-bottom: 1.5rem; }
+    .footer { background-color: #343a40; color: white; padding: 1rem 0; margin-top: 2rem; }
     """
     
     with open('static/css/main.css', 'w') as f:
@@ -615,110 +431,27 @@ def generate_css():
 
 def generate_js():
     """Generate JavaScript for the web interface"""
+    # Skip if already exists
+    if os.path.exists('static/js/main.js'):
+        return
+        
     os.makedirs('static/js', exist_ok=True)
     
-    # Main JS file
+    # Main JS file - minimal version
     main_js = """
-    // Main application JavaScript
+    // Main application JavaScript - Minimal version
     document.addEventListener('DOMContentLoaded', function() {
-        // Initialize tooltips
-        const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'))
-        const tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
-            return new bootstrap.Tooltip(tooltipTriggerEl)
-        });
-        
-        // Initialize popovers
-        const popoverTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="popover"]'))
-        const popoverList = popoverTriggerList.map(function (popoverTriggerEl) {
-            return new bootstrap.Popover(popoverTriggerEl)
-        });
-        
-        // Active navigation highlighting
-        const currentPath = window.location.pathname;
-        const navLinks = document.querySelectorAll('.nav-link');
-        
-        navLinks.forEach(link => {
-            const linkPath = link.getAttribute('href');
-            if (linkPath && currentPath.includes(linkPath) && linkPath !== '/') {
-                link.classList.add('active');
-            } else if (linkPath === '/' && currentPath === '/') {
-                link.classList.add('active');
-            }
-        });
-        
         // Handle flash messages auto-dismiss
         const flashMessages = document.querySelectorAll('.alert-dismissible');
         flashMessages.forEach(message => {
             setTimeout(() => {
-                // Create a fadeout effect
-                message.style.transition = 'opacity 1s';
-                message.style.opacity = '0';
-                
-                // Remove after fadeout
-                setTimeout(() => {
-                    message.remove();
-                }, 1000);
-            }, 5000); // 5 seconds
-        });
-        
-        // Password strength indicator
-        const passwordInput = document.getElementById('password');
-        const passwordStrength = document.getElementById('password-strength');
-        
-        if (passwordInput && passwordStrength) {
-            passwordInput.addEventListener('input', function() {
-                const strength = checkPasswordStrength(this.value);
-                
-                passwordStrength.className = 'password-strength';
-                if (strength === 'weak') {
-                    passwordStrength.classList.add('weak');
-                    passwordStrength.textContent = 'Weak';
-                } else if (strength === 'medium') {
-                    passwordStrength.classList.add('medium');
-                    passwordStrength.textContent = 'Medium';
-                } else {
-                    passwordStrength.classList.add('strong');
-                    passwordStrength.textContent = 'Strong';
+                if (message.parentNode) {
+                    message.style.opacity = '0';
+                    setTimeout(() => message.remove(), 500);
                 }
-            });
-        }
+            }, 5000);
+        });
     });
-    
-    // Password strength checker
-    function checkPasswordStrength(password) {
-        if (password.length < 6) {
-            return 'weak';
-        }
-        
-        let score = 0;
-        
-        // Has uppercase letter
-        if (/[A-Z]/.test(password)) score++;
-        
-        // Has lowercase letter
-        if (/[a-z]/.test(password)) score++;
-        
-        // Has number
-        if (/[0-9]/.test(password)) score++;
-        
-        // Has special character
-        if (/[^A-Za-z0-9]/.test(password)) score++;
-        
-        // Length > 10
-        if (password.length > 10) score++;
-        
-        if (score >= 4) return 'strong';
-        if (score >= 2) return 'medium';
-        return 'weak';
-    }
-    
-    // Handle sidebar toggle on mobile
-    function toggleSidebar() {
-        const sidebar = document.getElementById('sidebar');
-        if (sidebar) {
-            sidebar.classList.toggle('d-none');
-        }
-    }
     """
     
     with open('static/js/main.js', 'w') as f:
@@ -726,32 +459,188 @@ def generate_js():
 
 def generate_base_templates():
     """Generate the base HTML templates for the application"""
+    # Skip if templates already exist
+    if os.path.exists('templates/base.html') and os.path.exists('templates/index.html'):
+        return
+        
     os.makedirs('templates', exist_ok=True)
     
-    # Create a simple index.html template if it doesn't exist
-    if not os.path.exists('templates/index.html'):
-        index_html = """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Malware Detonation Platform</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        </head>
-        <body>
-            <div class="container mt-5">
+    # Create base template
+    base_html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{% block title %}{{ app_name }}{% endblock %}</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+        <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
+        {% block styles %}{% endblock %}
+    </head>
+    <body>
+        <nav class="navbar navbar-expand-lg navbar-dark">
+            <div class="container">
+                <a class="navbar-brand" href="{{ url_for('web.index') }}">{{ app_name }}</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navbarNav">
+                    <ul class="navbar-nav me-auto">
+                        {% if current_user.is_authenticated %}
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('web.dashboard') }}">Dashboard</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('malware.index') }}">Malware</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('detonation.index') }}">Detonation</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('viz.index') }}">Visualizations</a>
+                        </li>
+                        {% endif %}
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('web.about') }}">About</a>
+                        </li>
+                    </ul>
+                    <ul class="navbar-nav">
+                        {% if current_user.is_authenticated %}
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown">
+                                {{ current_user.username }}
+                            </a>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                                <li><a class="dropdown-item" href="{{ url_for('web.profile') }}">Profile</a></li>
+                                {% if current_user.role == 'admin' %}
+                                <li><a class="dropdown-item" href="{{ url_for('web.admin') }}">Admin</a></li>
+                                {% endif %}
+                                <li><hr class="dropdown-divider"></li>
+                                <li><a class="dropdown-item" href="{{ url_for('web.logout') }}">Logout</a></li>
+                            </ul>
+                        </li>
+                        {% else %}
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('web.login') }}">Login</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('web.register') }}">Register</a>
+                        </li>
+                        {% endif %}
+                    </ul>
+                </div>
+            </div>
+        </nav>
+
+        <main class="main-content">
+            {% block content %}{% endblock %}
+        </main>
+
+        <footer class="footer">
+            <div class="container">
                 <div class="text-center">
-                    <h1>Malware Detonation Platform</h1>
-                    <p class="lead">A platform for security analysts to analyze and detonate malware samples.</p>
-                    <div class="mt-4">
-                        <a href="/login" class="btn btn-primary">Login</a>
-                        <a href="/register" class="btn btn-outline-primary">Register</a>
+                    <p>&copy; {{ year }} {{ app_name }}</p>
+                </div>
+            </div>
+        </footer>
+
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+        <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+        {% block scripts %}{% endblock %}
+    </body>
+    </html>
+    """
+    
+    # Create a minimal index template
+    index_html = """
+    {% extends 'base.html' %}
+    
+    {% block title %}{{ app_name }} - Home{% endblock %}
+    
+    {% block content %}
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-lg-8 text-center">
+                <h1>{{ app_name }}</h1>
+                <p class="lead">A platform for security analysts to analyze and detonate malware samples</p>
+                
+                {% if not current_user.is_authenticated %}
+                <div class="mt-4">
+                    <a href="{{ url_for('web.login') }}" class="btn btn-primary me-2">Login</a>
+                    <a href="{{ url_for('web.register') }}" class="btn btn-outline-primary">Register</a>
+                </div>
+                {% else %}
+                <div class="mt-4">
+                    <a href="{{ url_for('web.dashboard') }}" class="btn btn-primary me-2">Go to Dashboard</a>
+                    <a href="{{ url_for('malware.upload') }}" class="btn btn-outline-primary">Upload Malware</a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endblock %}
+    """
+    
+    # Create a minimal login template
+    login_html = """
+    {% extends 'base.html' %}
+    
+    {% block title %}Login - {{ app_name }}{% endblock %}
+    
+    {% block content %}
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <div class="card auth-card">
+                    <div class="card-body">
+                        <div class="auth-header">
+                            <h2>Login</h2>
+                        </div>
+                        
+                        {% with messages = get_flashed_messages(with_categories=true) %}
+                          {% if messages %}
+                            {% for category, message in messages %}
+                              <div class="alert alert-{{ category }}">{{ message }}</div>
+                            {% endfor %}
+                          {% endif %}
+                        {% endwith %}
+                        
+                        <form method="POST">
+                            <div class="mb-3">
+                                <label for="username" class="form-label">Username</label>
+                                <input type="text" class="form-control" id="username" name="username" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="password" class="form-label">Password</label>
+                                <input type="password" class="form-control" id="password" name="password" required>
+                            </div>
+                            <div class="mb-3 form-check">
+                                <input type="checkbox" class="form-check-input" id="remember" name="remember">
+                                <label class="form-check-label" for="remember">Remember me</label>
+                            </div>
+                            <div class="d-grid">
+                                <button type="submit" class="btn btn-primary">Login</button>
+                            </div>
+                        </form>
+                        
+                        <div class="text-center mt-3">
+                            <p>Don't have an account? <a href="{{ url_for('web.register') }}">Register</a></p>
+                        </div>
                     </div>
                 </div>
             </div>
-        </body>
-        </html>
-        """
-        with open('templates/index.html', 'w') as f:
-            f.write(index_html)
+        </div>
+    </div>
+    {% endblock %}
+    """
+    
+    # Write templates to files
+    with open('templates/base.html', 'w') as f:
+        f.write(base_html)
+        
+    with open('templates/index.html', 'w') as f:
+        f.write(index_html)
+        
+    with open('templates/login.html', 'w') as f:
+        f.write(login_html)
