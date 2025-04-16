@@ -22,12 +22,11 @@ numpy==1.24.4
 
 # Security and file analysis
 python-magic==0.4.27
-# Commented out packages that require compilation:
+
+# Commenting out packages that require compilation and are causing build failures
 # pefile==2023.2.7
 # yara-python==4.3.1
 # ssdeep==3.4
 # oletools==0.60.1
-# hashlib is part of the Python standard library, no need to specify it
-# hashlib==20081119
 
 # The rest of your requirements...
