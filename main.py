@@ -13,21 +13,6 @@ MODULES = {
     'web': 'web_interface'  # Web interface
 }
 
-# Global registry for lazy-loaded modules
-_loaded_modules = {}
-
-def get_module(module_name):
-    """Lazy-load a module only when needed"""
-    if module_name not in _loaded_modules:
-        if module_name in MODULES:
-            try:
-                _loaded_modules[module_name] = importlib.import_module(MODULES[module_name])
-                logging.getLogger(__name__).info(f"Lazy-loaded module: {module_name}")
-            except ImportError as e:
-                logging.getLogger(__name__).error(f"Failed to import module {module_name}: {str(e)}")
-                return None
-    return _loaded_modules.get(module_name)
-
 def create_app(test_config=None):
     """Application factory to create and configure the Flask app"""
     # Create and configure the app
@@ -36,7 +21,10 @@ def create_app(test_config=None):
                 template_folder='templates')
     
     # Configure logging
-    setup_logging(app)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     logger = logging.getLogger(__name__)
     
     # Load configuration
@@ -74,47 +62,29 @@ def create_app(test_config=None):
     # Setup essential directories
     _setup_directories(app)
     
+    # Initialize database
+    from database import init_app
+    init_app(app)
+    
+    # Load all modules eagerly at startup
+    logger.info("Loading all modules at startup")
+    for module_name, module_path in MODULES.items():
+        try:
+            module = importlib.import_module(module_path)
+            if hasattr(module, 'init_app'):
+                module.init_app(app)
+                logger.info(f"Initialized module: {module_name}")
+        except ImportError as e:
+            logger.error(f"Failed to import module {module_name}: {str(e)}")
+    
     # Ensure we have a minimal index.html
     with app.app_context():
         ensure_index_template(app)
-    
-    # Initialize web interface only - other modules will be lazy-loaded
-    web_module = get_module('web')
-    if web_module and hasattr(web_module, 'init_app'):
-        web_module.init_app(app)
     
     # Health check endpoint
     @app.route('/health')
     def health_check():
         return {'status': 'healthy'}, 200
-    
-    # Register lazy loading routes for other modules
-    @app.route('/malware', defaults={'path': ''})
-    @app.route('/malware/<path:path>')
-    def malware_routes(path):
-        malware_module = get_module('malware')
-        if malware_module and hasattr(malware_module, 'malware_bp'):
-            if not app.blueprints.get('malware'):
-                app.register_blueprint(malware_module.malware_bp)
-        return app.dispatch_request()
-    
-    @app.route('/detonation', defaults={'path': ''})
-    @app.route('/detonation/<path:path>')
-    def detonation_routes(path):
-        detonation_module = get_module('detonation')
-        if detonation_module and hasattr(detonation_module, 'detonation_bp'):
-            if not app.blueprints.get('detonation'):
-                app.register_blueprint(detonation_module.detonation_bp)
-        return app.dispatch_request()
-    
-    @app.route('/viz', defaults={'path': ''})
-    @app.route('/viz/<path:path>')
-    def viz_routes(path):
-        viz_module = get_module('viz')
-        if viz_module and hasattr(viz_module, 'viz_bp'):
-            if not app.blueprints.get('viz'):
-                app.register_blueprint(viz_module.viz_bp)
-        return app.dispatch_request()
     
     # Simple error handlers
     @app.errorhandler(404)
@@ -157,13 +127,6 @@ def ensure_index_template(app):
 </body>
 </html>""")
         logging.getLogger(__name__).info("Created minimal index.html template")
-
-def setup_logging(app):
-    """Set up basic logging"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
 
 def _setup_directories(app):
     """Set up essential application directories"""
