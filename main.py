@@ -4,13 +4,14 @@ import sqlite3
 import logging
 import importlib
 from pathlib import Path
+from google.cloud import logging as gcp_logging
 
 # Module configuration
 MODULES = {
-    'data': 'data_module',
-    'analysis': 'analysis_module',
-    'visualization': 'viz_module',  # Updated to use the new viz_module
-    'web': 'web_interface_module'
+    'malware': 'malware_module',  # Handles malware samples (replaces data_module)
+    'detonation': 'detonation_module',  # Handles VM detonation (replaces analysis_module)
+    'results': 'results_module',  # Handles analysis results (replaces viz_module)
+    'web': 'web_interface_module'  # Web interface remains the same
 }
 
 def create_app(test_config=None):
@@ -21,10 +22,7 @@ def create_app(test_config=None):
                 template_folder='templates')
     
     # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    setup_logging(app)
     logger = logging.getLogger(__name__)
     
     # Load configuration
@@ -56,9 +54,39 @@ def create_app(test_config=None):
     def server_error(e):
         mod = importlib.import_module(MODULES['web'])
         return mod.handle_500(), 500
+        
+    # Add health check endpoint for Cloud Run
+    @app.route('/health')
+    def health_check():
+        return {'status': 'healthy'}, 200
     
     logger.info("Application setup complete")
     return app
+
+def setup_logging(app):
+    """Set up logging with GCP integration if available"""
+    # Check if we're running on Cloud Run
+    on_cloud_run = os.environ.get('K_SERVICE') is not None
+    
+    if on_cloud_run:
+        # Set up Google Cloud Logging
+        try:
+            client = gcp_logging.Client()
+            client.setup_logging(log_level=logging.INFO)
+            app.logger.info("Google Cloud Logging initialized")
+        except Exception as e:
+            # Fall back to standard logging
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            app.logger.warning(f"Failed to initialize Google Cloud Logging: {str(e)}")
+    else:
+        # Standard logging for local development
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
 
 def _setup_directories(app):
     """Set up all required application directories"""
@@ -133,9 +161,32 @@ def create_cli_commands(app):
         with app.app_context():
             _init_database()
         print("Initialized the database.")
+    
+    @app.cli.command("create-buckets")
+    def create_buckets_command():
+        """Create GCP storage buckets if they don't exist."""
+        from google.cloud import storage
+        
+        client = storage.Client()
+        
+        # Create malware samples bucket
+        samples_bucket_name = app.config['GCP_STORAGE_BUCKET']
+        if not client.bucket(samples_bucket_name).exists():
+            bucket = client.create_bucket(samples_bucket_name)
+            print(f"Created bucket {bucket.name}")
+        else:
+            print(f"Bucket {samples_bucket_name} already exists")
+            
+        # Create results bucket
+        results_bucket_name = app.config['GCP_RESULTS_BUCKET']
+        if not client.bucket(results_bucket_name).exists():
+            bucket = client.create_bucket(results_bucket_name)
+            print(f"Created bucket {bucket.name}")
+        else:
+            print(f"Bucket {results_bucket_name} already exists")
 
 if __name__ == "__main__":
     app = create_app()
     create_cli_commands(app)
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=app.config['DEBUG'])
