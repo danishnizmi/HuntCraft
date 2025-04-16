@@ -9,15 +9,15 @@ Flask-Login==0.6.2
 SQLAlchemy==2.0.20
 psycopg2-binary==2.9.7
 
-# GCP libraries - include only what you need
+# GCP libraries - include all needed for detonation
 google-cloud-storage==2.10.0
 google-cloud-logging==3.5.0
-# google-cloud-compute==1.12.0  # Uncomment if needed
-# google-cloud-monitoring==2.15.0  # Uncomment if needed
-# google-cloud-secret-manager==2.16.2  # Uncomment if needed
-# google-cloud-pubsub==2.18.4  # Uncomment if needed
+google-cloud-compute==1.12.0
+google-cloud-monitoring==2.15.0
+google-cloud-secret-manager==2.16.2
+google-cloud-pubsub==2.18.4
 google-auth==2.23.0
-# google-cloud-functions==1.13.1  # Uncomment if needed
+google-cloud-functions==1.13.1
 
 # Security and file analysis - essential minimum
 python-magic==0.4.27
@@ -35,10 +35,7 @@ pytz==2023.3
 # ssdeep==3.4
 # oletools==0.60.1
 
-# Heavy packages - only uncomment if you have significant memory available
+# Heavy packages - uncomment if visualizations needed
 # pandas==2.0.3
 # numpy==1.24.4
 # plotly==5.15.0
-
-# Keep these commented unless explicitly needed and memory allows
-# The application will use stub modules instead
