@@ -36,10 +36,10 @@ six==1.16.0
 python-dateutil==2.8.2
 pytz==2023.3
 
-# Commenting out packages that require compilation and are causing build failures
-# pefile==2023.2.7
-# yara-python==4.3.1
-# ssdeep==3.4
-# oletools==0.60.1
-
-# hashlib is part of the Python standard library, no need to specify it
+# Commented out packages that require compilation
+# These lines need to be completely removed or commented like this
+# with no actual package specification following the comment character
+#pefile==2023.2.7
+#yara-python==4.3.1
+#ssdeep==3.4
+#oletools==0.60.1
