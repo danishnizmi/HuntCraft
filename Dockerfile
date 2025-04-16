@@ -53,7 +53,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     plotly==5.15.0 \
     # Utilities
     requests==2.31.0 \
-    urllib3==2.0.4 \
+    urllib3==1.26.16 \
     six==1.16.0 \
     python-dateutil==2.8.2 \
     pytz==2023.3
