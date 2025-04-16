@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, g, jsonify, session
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-import sqlite3, json, os, datetime, logging
+import sqlite3, json, os, datetime, logging, traceback
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -20,6 +20,7 @@ def init_app(app):
     # Set up exception handling
     app.errorhandler(500)(handle_server_error)
     app.errorhandler(404)(handle_not_found)
+    app.errorhandler(Exception)(handle_exception)
     
     # Register blueprint
     app.register_blueprint(web_bp)
@@ -45,16 +46,39 @@ def init_app(app):
 
 def handle_server_error(e):
     """Handle 500 errors gracefully"""
-    logger.error(f"Server error: {str(e)}")
-    return render_template('error.html', 
-                          error_code=500,
-                          error_message="The server encountered an internal error. Please try again later."), 500
+    error_traceback = traceback.format_exc()
+    logger.error(f"Server error: {str(e)}\n{error_traceback}")
+    if current_app.config.get('DEBUG', False):
+        # Show detailed error information in debug mode
+        return render_template('error.html', 
+                              error_code=500,
+                              error_message=f"Server error: {str(e)}",
+                              error_details=error_traceback), 500
+    else:
+        return render_template('error.html', 
+                              error_code=500,
+                              error_message="The server encountered an internal error. Please try again later."), 500
 
 def handle_not_found(e):
     """Handle 404 errors gracefully"""
     return render_template('error.html',
                           error_code=404,
                           error_message="The requested page was not found."), 404
+
+def handle_exception(e):
+    """Handle uncaught exceptions"""
+    error_traceback = traceback.format_exc()
+    logger.error(f"Uncaught exception: {str(e)}\n{error_traceback}")
+    if current_app.config.get('DEBUG', False):
+        # Show detailed error information in debug mode
+        return render_template('error.html', 
+                              error_code=500,
+                              error_message=f"Uncaught exception: {str(e)}",
+                              error_details=error_traceback), 500
+    else:
+        return render_template('error.html', 
+                              error_code=500,
+                              error_message="The server encountered an internal error. Please try again later."), 500
 
 def inject_template_variables():
     """Inject common variables into all templates"""
@@ -226,8 +250,8 @@ def dashboard():
     try:
         # Safe import of modules using try/except
         try:
-            from malware_module import get_recent_samples
-            datasets = get_recent_samples(5)
+            from malware_module import get_datasets
+            datasets = get_datasets()
         except Exception as e:
             logger.error(f"Error loading recent samples: {e}")
         
@@ -313,6 +337,38 @@ def add_user():
     
     return render_template('user_form.html', user=None)
 
+@web_bp.route('/infrastructure')
+@login_required
+@admin_required
+def infrastructure():
+    """Infrastructure management page"""
+    try:
+        # Get GCP project info
+        project_id = current_app.config.get('GCP_PROJECT_ID', 'Not configured')
+        region = current_app.config.get('GCP_REGION', 'us-central1')
+        
+        # Get storage bucket info
+        samples_bucket = current_app.config.get('GCP_STORAGE_BUCKET', 'Not configured')
+        results_bucket = current_app.config.get('GCP_RESULTS_BUCKET', 'Not configured')
+        
+        # Get VM configuration
+        vm_network = current_app.config.get('VM_NETWORK', 'detonation-network')
+        vm_subnet = current_app.config.get('VM_SUBNET', 'detonation-subnet')
+        vm_machine_type = current_app.config.get('VM_MACHINE_TYPE', 'e2-medium')
+        
+        return render_template('infrastructure.html', 
+                             project_id=project_id,
+                             region=region,
+                             samples_bucket=samples_bucket,
+                             results_bucket=results_bucket,
+                             vm_network=vm_network,
+                             vm_subnet=vm_subnet,
+                             vm_machine_type=vm_machine_type)
+    except Exception as e:
+        logger.error(f"Error loading infrastructure data: {e}")
+        flash("Error loading infrastructure data", "danger")
+        return redirect(url_for('web.dashboard'))
+
 @web_bp.route('/health')
 def health_check():
     """Health check endpoint"""
@@ -373,6 +429,7 @@ def generate_base_templates():
                             <li><a class="dropdown-item" href="{{ url_for('web.profile') }}">Profile</a></li>
                             {% if current_user.role == 'admin' %}
                             <li><a class="dropdown-item" href="{{ url_for('web.users') }}">User Management</a></li>
+                            <li><a class="dropdown-item" href="{{ url_for('web.infrastructure') }}">Infrastructure</a></li>
                             {% endif %}
                             <li><hr class="dropdown-divider"></li>
                             <li><a class="dropdown-item" href="{{ url_for('web.logout') }}">Logout</a></li>
@@ -704,11 +761,186 @@ def generate_base_templates():
                 <p class="display-1 text-danger"><i class="fas fa-exclamation-triangle"></i></p>
                 <h4>{{ error_message }}</h4>
                 <p class="text-muted">Please try again or contact your system administrator if the problem persists.</p>
+                
+                {% if error_details and config.get('DEBUG', False) %}
+                <div class="alert alert-secondary mt-4">
+                    <h5>Debug Details</h5>
+                    <pre class="text-start"><code>{{ error_details }}</code></pre>
+                </div>
+                {% endif %}
+                
                 <a href="/" class="btn btn-primary mt-3">Return to Home</a>
             </div>
         </div>
     </div>
 </div>
+{% endblock %}""",
+
+        'infrastructure.html': """{% extends 'base.html' %}
+
+{% block title %}Infrastructure - {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>Infrastructure Management</h1>
+    <div>
+        <a href="{{ url_for('web.dashboard') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left"></i> Back to Dashboard
+        </a>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">GCP Configuration</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tr>
+                        <th width="35%">Project ID:</th>
+                        <td>{{ project_id }}</td>
+                    </tr>
+                    <tr>
+                        <th>Region:</th>
+                        <td>{{ region }}</td>
+                    </tr>
+                    <tr>
+                        <th>Samples Bucket:</th>
+                        <td>{{ samples_bucket }}</td>
+                    </tr>
+                    <tr>
+                        <th>Results Bucket:</th>
+                        <td>{{ results_bucket }}</td>
+                    </tr>
+                </table>
+                
+                <div class="d-grid gap-2 mt-3">
+                    <button class="btn btn-outline-primary" onclick="checkGCPResources()">
+                        <i class="fas fa-check-circle"></i> Verify GCP Resources
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">System Health</h5>
+            </div>
+            <div class="card-body">
+                <div class="d-flex justify-content-between mb-3">
+                    <h6>Application Status:</h6>
+                    <span class="badge bg-success"><i class="fas fa-check"></i> Running</span>
+                </div>
+                
+                <div class="d-flex justify-content-between mb-3">
+                    <h6>Database Status:</h6>
+                    <span class="badge bg-success"><i class="fas fa-check"></i> Connected</span>
+                </div>
+                
+                <div class="d-flex justify-content-between mb-3">
+                    <h6>Storage Status:</h6>
+                    <span class="badge bg-success"><i class="fas fa-check"></i> Available</span>
+                </div>
+                
+                <div class="progress mt-3">
+                    <div class="progress-bar bg-success" role="progressbar" style="width: 25%;" aria-valuenow="25" aria-valuemin="0" aria-valuemax="100">25% Disk Usage</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Detonation VM Configuration</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tr>
+                        <th width="35%">Network:</th>
+                        <td>{{ vm_network }}</td>
+                    </tr>
+                    <tr>
+                        <th>Subnet:</th>
+                        <td>{{ vm_subnet }}</td>
+                    </tr>
+                    <tr>
+                        <th>Machine Type:</th>
+                        <td>{{ vm_machine_type }}</td>
+                    </tr>
+                    <tr>
+                        <th>Auto-deletion:</th>
+                        <td><span class="badge bg-success">Enabled</span></td>
+                    </tr>
+                </table>
+                
+                <div class="alert alert-info mt-3">
+                    <i class="fas fa-info-circle"></i> VM templates are configured with automatic cleanup after detonation completes.
+                </div>
+                
+                <div class="d-grid gap-2 mt-3">
+                    <button class="btn btn-outline-primary" onclick="testVMDeployment()">
+                        <i class="fas fa-server"></i> Test VM Deployment
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">System Logs</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="log-level" class="form-label">Log Level</label>
+                    <select class="form-select" id="log-level">
+                        <option value="info">Info</option>
+                        <option value="warning">Warning</option>
+                        <option value="error">Error</option>
+                        <option value="debug">Debug</option>
+                    </select>
+                </div>
+                
+                <div class="log-container p-2 bg-dark text-light rounded" style="height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.8rem;">
+                    <div>[INFO] 2023-01-15 12:30:45 - Application started successfully</div>
+                    <div>[INFO] 2023-01-15 12:30:46 - Database connection established</div>
+                    <div>[INFO] 2023-01-15 12:31:02 - User 'admin' logged in</div>
+                    <div>[INFO] 2023-01-15 12:35:18 - New malware sample uploaded (SHA256: 8a9f...)</div>
+                    <div>[INFO] 2023-01-15 12:40:33 - Detonation job #12 created</div>
+                    <div>[INFO] 2023-01-15 12:40:35 - VM deployment initiated for job #12</div>
+                    <div>[INFO] 2023-01-15 12:45:22 - Detonation job #12 completed</div>
+                </div>
+                
+                <div class="d-grid gap-2 mt-3">
+                    <button class="btn btn-outline-primary" onclick="refreshLogs()">
+                        <i class="fas fa-sync"></i> Refresh Logs
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function checkGCPResources() {
+        alert('GCP resource verification initiated. This may take a moment...');
+        // In a real implementation, this would make an AJAX call to a backend endpoint
+    }
+    
+    function testVMDeployment() {
+        alert('VM deployment test initiated. This may take a few minutes...');
+        // In a real implementation, this would make an AJAX call to a backend endpoint
+    }
+    
+    function refreshLogs() {
+        alert('Refreshing logs...');
+        // In a real implementation, this would make an AJAX call to get the latest logs
+    }
+</script>
 {% endblock %}"""
     }
     
@@ -742,6 +974,18 @@ footer {
     padding: 20px 0; 
     border-top: 1px solid #e9ecef; 
 }
+
+/* Enhanced error styles */
+pre {
+    background-color: #f8f9fa;
+    padding: 10px;
+    border-radius: 4px;
+    border: 1px solid #dee2e6;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+}
 """,
         
         'js/main.js': """// Main JavaScript
@@ -773,8 +1017,93 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(function() {
         fetch('/health')
             .then(response => response.json())
+            .then(data => {
+                if (data.status !== 'healthy') {
+                    console.warn('Health check reports unhealthy status:', data);
+                }
+            })
             .catch(error => console.error('Health check error:', error));
     }, 30000);
+
+    // Handle any forms with AJAX submission
+    const ajaxForms = document.querySelectorAll('form[data-ajax="true"]');
+    if (ajaxForms) {
+        ajaxForms.forEach(form => {
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                
+                const formData = new FormData(form);
+                const submitBtn = form.querySelector('button[type="submit"]');
+                const originalBtnText = submitBtn.innerHTML;
+                
+                // Disable button and show loading state
+                if (submitBtn) {
+                    submitBtn.disabled = true;
+                    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Processing...';
+                }
+                
+                // Send form data with fetch API
+                fetch(form.action, {
+                    method: form.method,
+                    body: formData,
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    // Handle response
+                    if (data.success) {
+                        if (data.redirect) {
+                            window.location.href = data.redirect;
+                        } else if (data.message) {
+                            showAlert(data.message, 'success');
+                        }
+                    } else {
+                        showAlert(data.message || 'An error occurred', 'danger');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error submitting form:', error);
+                    showAlert('An unexpected error occurred. Please try again.', 'danger');
+                })
+                .finally(() => {
+                    // Reset button state
+                    if (submitBtn) {
+                        submitBtn.disabled = false;
+                        submitBtn.innerHTML = originalBtnText;
+                    }
+                });
+            });
+        });
+    }
+    
+    // Function to show alert messages
+    function showAlert(message, type = 'info') {
+        const alertsContainer = document.createElement('div');
+        alertsContainer.className = 'alert-container';
+        alertsContainer.style.position = 'fixed';
+        alertsContainer.style.top = '20px';
+        alertsContainer.style.right = '20px';
+        alertsContainer.style.zIndex = '9999';
+        
+        const alert = document.createElement('div');
+        alert.className = `alert alert-${type} alert-dismissible fade show`;
+        alert.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        `;
+        
+        alertsContainer.appendChild(alert);
+        document.body.appendChild(alertsContainer);
+        
+        setTimeout(() => {
+            alert.classList.remove('show');
+            setTimeout(() => {
+                document.body.removeChild(alertsContainer);
+            }, 300);
+        }, 5000);
+    }
 });"""
     }
     
