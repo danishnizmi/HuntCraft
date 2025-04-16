@@ -2,21 +2,34 @@ from flask import Flask, current_app
 import os
 import sqlite3
 import logging
-from google.cloud import logging as gcp_logging
+import importlib
+from pathlib import Path
+
+# Module configuration - Fixed to use existing module names
+MODULES = {
+    'malware': 'malware_module',  # Handles malware samples
+    'detonation': 'detonation_module',  # Handles VM detonation
+    'viz': 'viz_module',  # Visualization module
+    'web': 'web_interface'  # Web interface
+}
 
 # Global registry for lazy-loaded modules
 _loaded_modules = {}
 
-# Module configuration
-MODULES = {
-    'malware': 'malware_module',
-    'detonation': 'detonation_module',
-    'viz': 'viz_module',
-    'web': 'web_interface'
-}
+def get_module(module_name):
+    """Lazy-load a module only when needed"""
+    if module_name not in _loaded_modules:
+        if module_name in MODULES:
+            try:
+                _loaded_modules[module_name] = importlib.import_module(MODULES[module_name])
+                logging.getLogger(__name__).info(f"Lazy-loaded module: {module_name}")
+            except ImportError as e:
+                logging.getLogger(__name__).error(f"Failed to import module {module_name}: {str(e)}")
+                return None
+    return _loaded_modules.get(module_name)
 
 def create_app(test_config=None):
-    """Application factory with optimized loading to reduce memory usage"""
+    """Application factory to create and configure the Flask app"""
     # Create and configure the app
     app = Flask(__name__, 
                 static_folder='static',
@@ -30,10 +43,6 @@ def create_app(test_config=None):
     try:
         import config
         app.config.from_object(config.Config if not test_config else test_config)
-        
-        # Configure templates to be pre-generated during build, not runtime
-        app.config['GENERATE_TEMPLATES'] = False
-        
         logger.info("Configuration loaded successfully")
     except Exception as e:
         logger.error(f"Error loading configuration: {str(e)}")
@@ -48,197 +57,128 @@ def create_app(test_config=None):
             GCP_PROJECT_ID=os.environ.get('GCP_PROJECT_ID', ''),
             GCP_REGION=os.environ.get('GCP_REGION', 'us-central1'),
             GCP_ZONE=os.environ.get('GCP_ZONE', 'us-central1-a'),
-            GENERATE_TEMPLATES=False
+            PRIMARY_COLOR='#4a6fa5',
+            SECONDARY_COLOR='#6c757d',
+            DANGER_COLOR='#dc3545',
+            SUCCESS_COLOR='#28a745',
+            WARNING_COLOR='#ffc107',
+            INFO_COLOR='#17a2b8',
+            DARK_COLOR='#343a40',
+            LIGHT_COLOR='#f8f9fa',
+            ENABLE_ADVANCED_ANALYSIS=True,
+            ENABLE_DATA_EXPORT=True,
+            ENABLE_VISUALIZATION=True,
+            GENERATE_TEMPLATES=os.environ.get('GENERATE_TEMPLATES', 'False').lower() in ('true', '1', 't')
         )
     
-    # Setup required directories - only essential ones at startup
-    _setup_essential_directories(app)
+    # Setup essential directories
+    _setup_directories(app)
     
-    # Initialize database schema - but don't load all data
+    # Ensure we have a minimal index.html
     with app.app_context():
-        try:
-            _init_database_schema()
-        except Exception as e:
-            logger.error(f"Database initialization error: {str(e)}")
+        ensure_index_template(app)
     
-    # Initialize only critical modules immediately (like 'web')
-    # Other modules will be lazy-loaded when needed
-    _init_core_modules(app)
+    # Initialize web interface only - other modules will be lazy-loaded
+    web_module = get_module('web')
+    if web_module and hasattr(web_module, 'init_app'):
+        web_module.init_app(app)
     
-    # Register error handlers
-    @app.errorhandler(404)
-    def page_not_found(e):
-        # Lazy load web module only when needed
-        web_module = get_module('web')
-        if hasattr(web_module, 'handle_404'):
-            return web_module.handle_404(), 404
-        return "Page not found", 404
-
-    @app.errorhandler(500)
-    def server_error(e):
-        # Lazy load web module only when needed
-        web_module = get_module('web')
-        if hasattr(web_module, 'handle_500'):
-            return web_module.handle_500(), 500
-        return "Server error", 500
-        
-    # Add health check endpoint for Cloud Run
+    # Health check endpoint
     @app.route('/health')
     def health_check():
         return {'status': 'healthy'}, 200
     
-    # Register Blueprint lazy-loading routes
-    _register_lazy_routes(app)
-    
-    logger.info("Application setup complete")
-    return app
-
-def get_module(module_name):
-    """Lazy-load a module only when needed"""
-    if module_name not in _loaded_modules:
-        import importlib
-        if module_name in MODULES:
-            try:
-                _loaded_modules[module_name] = importlib.import_module(MODULES[module_name])
-                logging.getLogger(__name__).info(f"Lazy-loaded module: {module_name}")
-            except ImportError as e:
-                logging.getLogger(__name__).error(f"Failed to import module {module_name}: {str(e)}")
-                return None
-    return _loaded_modules.get(module_name)
-
-def setup_logging(app):
-    """Set up logging with GCP integration if available"""
-    # Check if we're running on Cloud Run
-    on_cloud_run = os.environ.get('K_SERVICE') is not None
-    
-    if on_cloud_run:
-        # Set up Google Cloud Logging
-        try:
-            client = gcp_logging.Client()
-            client.setup_logging(log_level=logging.INFO)
-            app.logger.info("Google Cloud Logging initialized")
-        except Exception as e:
-            # Fall back to standard logging
-            logging.basicConfig(
-                level=logging.INFO,
-                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            app.logger.warning(f"Failed to initialize Google Cloud Logging: {str(e)}")
-    else:
-        # Standard logging for local development
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-
-def _setup_essential_directories(app):
-    """Set up only essential directories at startup"""
-    # Only create critical directories at startup
-    essential_dirs = [
-        app.config.get('UPLOAD_FOLDER', '/app/data/uploads'),
-        'static',
-        'templates',
-        os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db'))
-    ]
-    
-    for directory in essential_dirs:
-        os.makedirs(directory, exist_ok=True)
-
-def _init_core_modules(app):
-    """Initialize only critical modules (e.g., web interface)"""
-    logger = logging.getLogger(__name__)
-    
-    # Only initialize the web module at startup
-    web_module_name = 'web'
-    try:
-        web_module = get_module(web_module_name)
-        if hasattr(web_module, 'init_app'):
-            web_module.init_app(app)
-            logger.info(f"Initialized core module: {web_module_name}")
-    except Exception as e:
-        logger.error(f"Error initializing core module {web_module_name}: {str(e)}")
-
-def _register_lazy_routes(app):
-    """Register routes that trigger lazy module loading"""
-    logger = logging.getLogger(__name__)
-    
-    # Register malware routes
+    # Register lazy loading routes for other modules
     @app.route('/malware', defaults={'path': ''})
     @app.route('/malware/<path:path>')
     def malware_routes(path):
         malware_module = get_module('malware')
-        if not hasattr(malware_module, 'malware_bp'):
-            logger.error("Malware module not properly loaded")
-            return "Module error", 500
-            
-        # Register blueprint if not already registered
-        if not app.blueprints.get('malware'):
-            app.register_blueprint(malware_module.malware_bp)
-            
-        # Dispatch to the module
+        if malware_module and hasattr(malware_module, 'malware_bp'):
+            if not app.blueprints.get('malware'):
+                app.register_blueprint(malware_module.malware_bp)
         return app.dispatch_request()
     
-    # Register detonation routes
     @app.route('/detonation', defaults={'path': ''})
     @app.route('/detonation/<path:path>')
     def detonation_routes(path):
         detonation_module = get_module('detonation')
-        if not hasattr(detonation_module, 'detonation_bp'):
-            logger.error("Detonation module not properly loaded")
-            return "Module error", 500
-            
-        # Register blueprint if not already registered
-        if not app.blueprints.get('detonation'):
-            app.register_blueprint(detonation_module.detonation_bp)
-            
-        # Dispatch to the module
+        if detonation_module and hasattr(detonation_module, 'detonation_bp'):
+            if not app.blueprints.get('detonation'):
+                app.register_blueprint(detonation_module.detonation_bp)
         return app.dispatch_request()
     
-    # Register visualization routes
     @app.route('/viz', defaults={'path': ''})
     @app.route('/viz/<path:path>')
     def viz_routes(path):
         viz_module = get_module('viz')
-        if not hasattr(viz_module, 'viz_bp'):
-            logger.error("Visualization module not properly loaded")
-            return "Module error", 500
-            
-        # Register blueprint if not already registered
-        if not app.blueprints.get('viz'):
-            app.register_blueprint(viz_module.viz_bp)
-            
-        # Dispatch to the module
+        if viz_module and hasattr(viz_module, 'viz_bp'):
+            if not app.blueprints.get('viz'):
+                app.register_blueprint(viz_module.viz_bp)
         return app.dispatch_request()
+    
+    # Simple error handlers
+    @app.errorhandler(404)
+    def page_not_found(e):
+        return "Page not found", 404
 
-def _init_database_schema():
-    """Initialize the database schema only, without loading data"""
-    db_path = current_app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')
-    logger = logging.getLogger(__name__)
+    @app.errorhandler(500)
+    def server_error(e):
+        return "Server error", 500
     
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    return app
+
+def ensure_index_template(app):
+    """Create a minimal index.html if it doesn't exist"""
+    if not os.path.exists('templates/index.html'):
+        os.makedirs('templates', exist_ok=True)
+        with open('templates/index.html', 'w') as f:
+            f.write("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ app_name }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; text-align: center; }
+        h1 { color: #4a6fa5; }
+        .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>{{ app_name }}</h1>
+    <div class="card">
+        <p>The application is running. Use the links below to navigate:</p>
+        <ul style="list-style:none; padding:0;">
+            <li><a href="/malware">Malware Analysis</a></li>
+            <li><a href="/detonation">Detonation Service</a></li>
+            <li><a href="/viz">Visualizations</a></li>
+        </ul>
+    </div>
+</body>
+</html>""")
+        logging.getLogger(__name__).info("Created minimal index.html template")
+
+def setup_logging(app):
+    """Set up basic logging"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+def _setup_directories(app):
+    """Set up essential application directories"""
+    directories = [
+        app.config.get('UPLOAD_FOLDER', '/app/data/uploads'),
+        'static/css',
+        'static/js',
+        'templates',
+        os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db'))
+    ]
     
-    # Use context manager for proper cleanup
-    try:
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Create minimal web interface schema first
-            web_module = get_module('web')
-            if hasattr(web_module, 'create_database_schema'):
-                web_module.create_database_schema(cursor)
-                logger.info("Created web interface database schema")
-            
-            # Commit changes to ensure core functionality works
-            conn.commit()
-        
-        logger.info("Core database initialization complete")
-        
-    except Exception as e:
-        logger.error(f"Database initialization failed: {str(e)}")
-        raise
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
 
 if __name__ == "__main__":
     app = create_app()
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=app.config.get('DEBUG', False))
+    app.run(host="0.0.0.0", port=port, threaded=False)
