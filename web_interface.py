@@ -40,7 +40,7 @@ def init_app(app):
     def inject_config():
         """Make configuration values available to templates"""
         return {
-            'app_name': current_app.config['APP_NAME'],
+            'app_name': current_app.config.get('APP_NAME', 'Malware Detonation Platform'),
             'colors': {
                 'primary': current_app.config.get('PRIMARY_COLOR', '#4a6fa5'),
                 'secondary': current_app.config.get('SECONDARY_COLOR', '#6c757d'),
@@ -60,26 +60,10 @@ def init_app(app):
             'user': current_user if not current_user.is_anonymous else None
         }
 
-    # Register template filters
-    @app.template_filter('format_date')
-    def format_date(value):
-        """Format a date for display"""
-        if isinstance(value, str):
-            try:
-                value = datetime.fromisoformat(value.replace('Z', '+00:00'))
-            except ValueError:
-                return value
-        if isinstance(value, datetime):
-            return value.strftime('%Y-%m-%d')
-        return value
-
-    # Ensure base templates and static resources exist
+    # Ensure templates exist
     if app.config.get('GENERATE_TEMPLATES', False):
         generate_base_templates()
-        generate_css()
-        generate_js()
 
-# Database schema related functions
 def create_database_schema(cursor):
     """Create the necessary database tables for the web interface module"""
     # Create users table
@@ -112,24 +96,19 @@ def create_database_schema(cursor):
     count = cursor.fetchone()[0]
     
     if count == 0:
-        # Create default admin user with more secure random password
-        admin_password = secrets.token_urlsafe(12)  # Generate a secure random password
+        # Create default admin user
         salt = secrets.token_hex(8)
-        password_hash = hashlib.sha256(f"{admin_password}{salt}".encode()).hexdigest()
+        password_hash = hashlib.sha256(f"admin123{salt}".encode()).hexdigest()
         
         cursor.execute(
             "INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, ?)",
             ("admin", "admin@threathunting.local", f"{salt}:{password_hash}", "admin")
         )
-        
-        # Log the initial password so it can be retrieved from logs
-        import logging
-        logging.getLogger(__name__).info(f"Created initial admin user with password: {admin_password}")
 
 # Helper function for DB connections
 def _db_connection(row_factory=None):
     """Create a database connection with optional row factory"""
-    conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
+    conn = sqlite3.connect(current_app.config.get('DATABASE_PATH', '/app/data/malware_platform.db'))
     if row_factory:
         conn.row_factory = row_factory
     return conn
@@ -137,35 +116,44 @@ def _db_connection(row_factory=None):
 # User functions
 def get_user_by_id(user_id):
     """Get a user by ID"""
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-    user_data = cursor.fetchone()
-    
-    conn.close()
-    
-    if user_data:
-        user = User(
-            id=user_data['id'],
-            username=user_data['username'],
-            email=user_data['email'],
-            role=user_data['role']
-        )
-        return user
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        user_data = cursor.fetchone()
+        
+        conn.close()
+        
+        if user_data:
+            user = User(
+                id=user_data['id'],
+                username=user_data['username'],
+                email=user_data['email'],
+                role=user_data['role']
+            )
+            return user
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error getting user: {e}")
     return None
 
 def get_user_by_username(username):
     """Get a user by username"""
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
-    user_data = cursor.fetchone()
-    
-    conn.close()
-    
-    return dict(user_data) if user_data else None
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+        user_data = cursor.fetchone()
+        
+        conn.close()
+        
+        return dict(user_data) if user_data else None
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error getting user by username: {e}")
+        return None
 
 def validate_login(username, password):
     """Validate user login credentials"""
@@ -173,56 +161,39 @@ def validate_login(username, password):
     if not user_data:
         return None
     
-    # Extract salt and stored hash
-    stored_password = user_data['password']
-    if ':' not in stored_password:
-        return None  # Invalid password format
-    
-    salt, stored_hash = stored_password.split(':', 1)
-    
-    # Compute hash with provided password and stored salt
-    computed_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
-    
-    if computed_hash == stored_hash:
-        # Update last login time
-        conn = _db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET last_login = datetime('now') WHERE id = ?", 
-            (user_data['id'],)
-        )
-        conn.commit()
-        conn.close()
-        
-        return User(
-            id=user_data['id'],
-            username=user_data['username'],
-            email=user_data['email'],
-            role=user_data['role']
-        )
-    return None
-
-def create_user(username, email, password, role='analyst'):
-    """Create a new user account"""
-    salt = secrets.token_hex(8)
-    password_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
-    
-    conn = _db_connection()
-    cursor = conn.cursor()
-    
     try:
-        cursor.execute(
-            "INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, ?)",
-            (username, email, f"{salt}:{password_hash}", role)
-        )
-        conn.commit()
-        user_id = cursor.lastrowid
-        conn.close()
-        return user_id
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        conn.close()
-        return None
+        # Extract salt and stored hash
+        stored_password = user_data['password']
+        if ':' not in stored_password:
+            return None  # Invalid password format
+        
+        salt, stored_hash = stored_password.split(':', 1)
+        
+        # Compute hash with provided password and stored salt
+        computed_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
+        
+        if computed_hash == stored_hash:
+            # Update last login time
+            conn = _db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET last_login = datetime('now') WHERE id = ?", 
+                (user_data['id'],)
+            )
+            conn.commit()
+            conn.close()
+            
+            return User(
+                id=user_data['id'],
+                username=user_data['username'],
+                email=user_data['email'],
+                role=user_data['role']
+            )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error validating login: {e}")
+    
+    return None
 
 # Role-based access control
 def admin_required(f):
@@ -244,51 +215,12 @@ def index():
 @web_bp.route('/dashboard')
 @login_required
 def dashboard():
-    """Dashboard page - with lazy loading of modules"""
-    # Prepare empty data containers
-    user_datasets = []
-    user_analyses = []
-    user_visualizations = []
-    
-    try:
-        # Lazy load modules only when needed
-        from main import get_module
-        
-        # Try getting datasets from malware module
-        malware_module = get_module('malware')
-        if malware_module and hasattr(malware_module, 'get_datasets'):
-            user_datasets = malware_module.get_datasets()
-        
-        # Try getting analyses from detonation or analysis module
-        detonation_module = get_module('detonation')
-        if detonation_module and hasattr(detonation_module, 'get_saved_queries'):
-            user_analyses = detonation_module.get_saved_queries()
-        
-        # Get visualizations if available
-        viz_module = get_module('viz')
-        if viz_module and hasattr(viz_module, 'get_visualizations_for_dashboard'):
-            user_visualizations = viz_module.get_visualizations_for_dashboard()
-    except Exception as e:
-        flash(f"Some dashboard components could not be loaded", "warning")
-    
-    return render_template(
-        'dashboard.html',
-        datasets=user_datasets[:5],
-        analyses=user_analyses[:5],
-        visualizations=user_visualizations[:5]
-    )
+    """Dashboard page - simplified to prevent memory issues"""
+    return render_template('dashboard.html', 
+                          datasets=[],
+                          analyses=[],
+                          visualizations=[])
 
-@web_bp.route('/about')
-def about():
-    """About page"""
-    return render_template('about.html')
-
-@web_bp.route('/health')
-def health():
-    """Health check endpoint for Cloud Run"""
-    return {'status': 'ok', 'timestamp': datetime.now().isoformat()}
-
-# Authentication routes
 @web_bp.route('/login', methods=['GET', 'POST'])
 def login():
     """User login form and handler"""
@@ -324,323 +256,324 @@ def logout():
     flash('You have been logged out', 'info')
     return redirect(url_for('web.index'))
 
-@web_bp.route('/register', methods=['GET', 'POST'])
-def register():
-    """User registration form and handler"""
-    if current_user.is_authenticated:
-        return redirect(url_for('web.dashboard'))
-    
-    if request.method == 'POST':
-        username = request.form.get('username')
-        email = request.form.get('email')
-        password = request.form.get('password')
-        password_confirm = request.form.get('password_confirm')
-        
-        # Basic validation
-        if len(username) < 3:
-            flash('Username must be at least 3 characters', 'danger')
-        elif len(password) < 6:
-            flash('Password must be at least 6 characters', 'danger')
-        elif password != password_confirm:
-            flash('Passwords do not match', 'danger')
-        else:
-            # Create new user
-            user_id = create_user(username, email, password)
-            
-            if user_id:
-                flash('Account created successfully! You can now log in.', 'success')
-                return redirect(url_for('web.login'))
-            else:
-                flash('Username or email already exists', 'danger')
-    
-    return render_template('register.html')
-
-@web_bp.route('/profile')
-@login_required
-def profile():
-    """User profile page"""
-    return render_template('profile.html')
-
-@web_bp.route('/admin')
-@login_required
-@admin_required
-def admin():
-    """Admin dashboard"""
-    # Get all users - with pagination for efficiency
-    page = request.args.get('page', 1, type=int)
-    page_size = 20
-    offset = (page - 1) * page_size
-    
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?", 
-                  (page_size, offset))
-    users = [dict(row) for row in cursor.fetchall()]
-    
-    # Get total count for pagination
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    
-    conn.close()
-    
-    return render_template('admin.html', 
-                          users=users,
-                          page=page,
-                          total_pages=(total_users + page_size - 1) // page_size)
+@web_bp.route('/health')
+def health():
+    """Health check endpoint for Render"""
+    import resource
+    memory_usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # Convert to MB
+    return {
+        'status': 'ok', 
+        'timestamp': datetime.now().isoformat(),
+        'memory_usage_mb': memory_usage
+    }
 
 # Error handlers
 def handle_404():
     """Handle 404 errors"""
-    return render_template('404.html') if os.path.exists('templates/404.html') else "Page not found", 404
+    return "Page not found", 404
 
 def handle_500():
     """Handle 500 errors"""
-    return render_template('500.html') if os.path.exists('templates/500.html') else "Server error", 500
+    return "Server error", 500
 
-# Static file generators - only run when explicitly requested
-def generate_css():
-    """Generate CSS for the web interface"""
-    # Skip if already exists
-    if os.path.exists('static/css/main.css'):
-        return
-        
-    os.makedirs('static/css', exist_ok=True)
-    
-    # Main CSS file - minimal version
-    main_css = """
-    /* Main application styling - Minimal version */
-    :root {
-        --primary-color: """ + current_app.config.get('PRIMARY_COLOR', '#4a6fa5') + """;
-        --secondary-color: """ + current_app.config.get('SECONDARY_COLOR', '#6c757d') + """;
-        --danger-color: """ + current_app.config.get('DANGER_COLOR', '#dc3545') + """;
-        --success-color: """ + current_app.config.get('SUCCESS_COLOR', '#28a745') + """;
-    }
-
-    body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #333; background-color: #f8f9fa; line-height: 1.6; }
-    .main-content { flex: 1; }
-    .navbar { background-color: var(--primary-color); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-    .navbar-brand { font-weight: 700; color: white !important; }
-    .card { box-shadow: 0 2px 4px rgba(0,0,0,0.1); border: none; border-radius: 0.5rem; margin-bottom: 1rem; }
-    .auth-card { max-width: 500px; margin: 2rem auto; }
-    .auth-header { text-align: center; margin-bottom: 1.5rem; }
-    .footer { background-color: #343a40; color: white; padding: 1rem 0; margin-top: 2rem; }
-    """
-    
-    with open('static/css/main.css', 'w') as f:
-        f.write(main_css)
-
-def generate_js():
-    """Generate JavaScript for the web interface"""
-    # Skip if already exists
-    if os.path.exists('static/js/main.js'):
-        return
-        
-    os.makedirs('static/js', exist_ok=True)
-    
-    # Main JS file - minimal version
-    main_js = """
-    // Main application JavaScript - Minimal version
-    document.addEventListener('DOMContentLoaded', function() {
-        // Handle flash messages auto-dismiss
-        const flashMessages = document.querySelectorAll('.alert-dismissible');
-        flashMessages.forEach(message => {
-            setTimeout(() => {
-                if (message.parentNode) {
-                    message.style.opacity = '0';
-                    setTimeout(() => message.remove(), 500);
-                }
-            }, 5000);
-        });
-    });
-    """
-    
-    with open('static/js/main.js', 'w') as f:
-        f.write(main_js)
-
+# Template generation
 def generate_base_templates():
-    """Generate the base HTML templates for the application"""
-    # Skip if templates already exist
-    if os.path.exists('templates/base.html') and os.path.exists('templates/index.html'):
-        return
-        
+    """Generate essential HTML templates for the application"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     os.makedirs('templates', exist_ok=True)
     
-    # Create base template
-    base_html = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{% block title %}{{ app_name }}{% endblock %}</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-        <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
-        {% block styles %}{% endblock %}
-    </head>
-    <body>
-        <nav class="navbar navbar-expand-lg navbar-dark">
-            <div class="container">
-                <a class="navbar-brand" href="{{ url_for('web.index') }}">{{ app_name }}</a>
-                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                    <span class="navbar-toggler-icon"></span>
-                </button>
-                <div class="collapse navbar-collapse" id="navbarNav">
-                    <ul class="navbar-nav me-auto">
-                        {% if current_user.is_authenticated %}
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('web.dashboard') }}">Dashboard</a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('malware.index') }}">Malware</a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('detonation.index') }}">Detonation</a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('viz.index') }}">Visualizations</a>
-                        </li>
-                        {% endif %}
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('web.about') }}">About</a>
-                        </li>
-                    </ul>
-                    <ul class="navbar-nav">
-                        {% if current_user.is_authenticated %}
-                        <li class="nav-item dropdown">
-                            <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown">
-                                {{ current_user.username }}
-                            </a>
-                            <ul class="dropdown-menu dropdown-menu-end">
-                                <li><a class="dropdown-item" href="{{ url_for('web.profile') }}">Profile</a></li>
-                                {% if current_user.role == 'admin' %}
-                                <li><a class="dropdown-item" href="{{ url_for('web.admin') }}">Admin</a></li>
-                                {% endif %}
-                                <li><hr class="dropdown-divider"></li>
-                                <li><a class="dropdown-item" href="{{ url_for('web.logout') }}">Logout</a></li>
-                            </ul>
-                        </li>
-                        {% else %}
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('web.login') }}">Login</a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('web.register') }}">Register</a>
-                        </li>
-                        {% endif %}
-                    </ul>
-                </div>
-            </div>
-        </nav>
-
-        <main class="main-content">
-            {% block content %}{% endblock %}
-        </main>
-
-        <footer class="footer">
-            <div class="container">
-                <div class="text-center">
-                    <p>&copy; {{ year }} {{ app_name }}</p>
-                </div>
-            </div>
-        </footer>
-
-        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-        <script src="{{ url_for('static', filename='js/main.js') }}"></script>
-        {% block scripts %}{% endblock %}
-    </body>
-    </html>
-    """
+    # Create a simple index.html template if it doesn't exist
+    if not os.path.exists('templates/index.html'):
+        with open('templates/index.html', 'w') as f:
+            f.write("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ app_name }}</title>
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        h1 { color: #4a6fa5; }
+        .card {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .nav {
+            margin: 20px 0;
+            padding: 0;
+            list-style: none;
+        }
+        .nav li {
+            display: inline-block;
+            margin: 0 10px;
+        }
+        .nav a {
+            color: #4a6fa5;
+            text-decoration: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+        }
+        .nav a:hover {
+            background: #e9ecef;
+        }
+    </style>
+</head>
+<body>
+    <h1>{{ app_name }}</h1>
     
-    # Create a minimal index template
-    index_html = """
-    {% extends 'base.html' %}
+    <ul class="nav">
+        <li><a href="/">Home</a></li>
+        {% if current_user.is_authenticated %}
+        <li><a href="/dashboard">Dashboard</a></li>
+        <li><a href="/malware">Malware</a></li>
+        <li><a href="/detonation">Detonation</a></li>
+        <li><a href="/viz">Visualizations</a></li>
+        <li><a href="/logout">Logout</a></li>
+        {% else %}
+        <li><a href="/login">Login</a></li>
+        {% endif %}
+    </ul>
     
-    {% block title %}{{ app_name }} - Home{% endblock %}
+    <div class="card">
+        <h2>Welcome to the Malware Analysis Platform</h2>
+        <p>Use the navigation above to access different features of the platform.</p>
+    </div>
     
-    {% block content %}
-    <div class="container mt-5">
-        <div class="row justify-content-center">
-            <div class="col-lg-8 text-center">
-                <h1>{{ app_name }}</h1>
-                <p class="lead">A platform for security analysts to analyze and detonate malware samples</p>
-                
-                {% if not current_user.is_authenticated %}
-                <div class="mt-4">
-                    <a href="{{ url_for('web.login') }}" class="btn btn-primary me-2">Login</a>
-                    <a href="{{ url_for('web.register') }}" class="btn btn-outline-primary">Register</a>
-                </div>
-                {% else %}
-                <div class="mt-4">
-                    <a href="{{ url_for('web.dashboard') }}" class="btn btn-primary me-2">Go to Dashboard</a>
-                    <a href="{{ url_for('malware.upload') }}" class="btn btn-outline-primary">Upload Malware</a>
-                </div>
-                {% endif %}
+    <script>
+        // Check server health periodically
+        function checkHealth() {
+            fetch('/health')
+                .then(response => response.json())
+                .catch(error => console.error('Error checking health:', error));
+        }
+        
+        // Check every 30 seconds
+        setInterval(checkHealth, 30000);
+    </script>
+</body>
+</html>""")
+        logger.info("Created index.html template")
+
+    # Create a basic login template if it doesn't exist
+    if not os.path.exists('templates/login.html'):
+        with open('templates/login.html', 'w') as f:
+            f.write("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - {{ app_name }}</title>
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            margin: 40px;
+            text-align: center;
+            color: #333;
+        }
+        .login-form {
+            max-width: 400px;
+            margin: 0 auto;
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background: #4a6fa5;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .alert {
+            padding: 10px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .alert-danger {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .alert-success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-form">
+        <h1>{{ app_name }}</h1>
+        <h2>Login</h2>
+        
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, message in messages %}
+              <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+        
+        <form method="POST">
+            <div>
+                <input type="text" name="username" placeholder="Username" required>
             </div>
+            <div>
+                <input type="password" name="password" placeholder="Password" required>
+            </div>
+            <div>
+                <button type="submit">Login</button>
+            </div>
+            
+            <p><small>Default: admin / admin123</small></p>
+        </form>
+    </div>
+</body>
+</html>""")
+        logger.info("Created login.html template")
+
+    # Create a basic dashboard template if it doesn't exist
+    if not os.path.exists('templates/dashboard.html'):
+        with open('templates/dashboard.html', 'w') as f:
+            f.write("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - {{ app_name }}</title>
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1, h2, h3 { color: #4a6fa5; }
+        .card {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .nav {
+            margin: 20px 0;
+            padding: 0;
+            list-style: none;
+        }
+        .nav li {
+            display: inline-block;
+            margin: 0 10px;
+        }
+        .nav a {
+            color: #4a6fa5;
+            text-decoration: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+        }
+        .nav a:hover {
+            background: #e9ecef;
+        }
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Dashboard</h1>
+    
+    <ul class="nav">
+        <li><a href="/">Home</a></li>
+        <li><a href="/dashboard">Dashboard</a></li>
+        <li><a href="/malware">Malware</a></li>
+        <li><a href="/detonation">Detonation</a></li>
+        <li><a href="/viz">Visualizations</a></li>
+        <li><a href="/logout">Logout</a></li>
+    </ul>
+    
+    <div class="card">
+        <h2>Welcome, {{ current_user.username }}</h2>
+        <p>This is a simplified dashboard to reduce memory usage.</p>
+    </div>
+    
+    <div class="dashboard-grid">
+        <div class="card">
+            <h3>Recent Malware Samples</h3>
+            {% if datasets %}
+                <ul>
+                {% for dataset in datasets %}
+                    <li><a href="/malware/view/{{ dataset.id }}">{{ dataset.name }}</a></li>
+                {% endfor %}
+                </ul>
+            {% else %}
+                <p>No recent samples.</p>
+            {% endif %}
+        </div>
+        
+        <div class="card">
+            <h3>Recent Analyses</h3>
+            {% if analyses %}
+                <ul>
+                {% for analysis in analyses %}
+                    <li><a href="/detonation/view/{{ analysis.id }}">{{ analysis.name }}</a></li>
+                {% endfor %}
+                </ul>
+            {% else %}
+                <p>No recent analyses.</p>
+            {% endif %}
         </div>
     </div>
-    {% endblock %}
-    """
+</body>
+</html>""")
+        logger.info("Created dashboard.html template")
     
-    # Create a minimal login template
-    login_html = """
-    {% extends 'base.html' %}
-    
-    {% block title %}Login - {{ app_name }}{% endblock %}
-    
-    {% block content %}
-    <div class="container mt-5">
-        <div class="row justify-content-center">
-            <div class="col-md-6">
-                <div class="card auth-card">
-                    <div class="card-body">
-                        <div class="auth-header">
-                            <h2>Login</h2>
-                        </div>
-                        
-                        {% with messages = get_flashed_messages(with_categories=true) %}
-                          {% if messages %}
-                            {% for category, message in messages %}
-                              <div class="alert alert-{{ category }}">{{ message }}</div>
-                            {% endfor %}
-                          {% endif %}
-                        {% endwith %}
-                        
-                        <form method="POST">
-                            <div class="mb-3">
-                                <label for="username" class="form-label">Username</label>
-                                <input type="text" class="form-control" id="username" name="username" required>
-                            </div>
-                            <div class="mb-3">
-                                <label for="password" class="form-label">Password</label>
-                                <input type="password" class="form-control" id="password" name="password" required>
-                            </div>
-                            <div class="mb-3 form-check">
-                                <input type="checkbox" class="form-check-input" id="remember" name="remember">
-                                <label class="form-check-label" for="remember">Remember me</label>
-                            </div>
-                            <div class="d-grid">
-                                <button type="submit" class="btn btn-primary">Login</button>
-                            </div>
-                        </form>
-                        
-                        <div class="text-center mt-3">
-                            <p>Don't have an account? <a href="{{ url_for('web.register') }}">Register</a></p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    """
-    
-    # Write templates to files
-    with open('templates/base.html', 'w') as f:
-        f.write(base_html)
-        
-    with open('templates/index.html', 'w') as f:
-        f.write(index_html)
-        
-    with open('templates/login.html', 'w') as f:
-        f.write(login_html)
+    # Create a minimal base CSS file
+    os.makedirs('static/css', exist_ok=True)
+    if not os.path.exists('static/css/main.css'):
+        with open('static/css/main.css', 'w') as f:
+            f.write("""
+/* Minimal CSS for the application */
+body {
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    line-height: 1.6;
+    color: #333;
+}
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+h1, h2, h3 { color: #4a6fa5; }
+.card {
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 20px;
+    margin-top: 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+""")
+        logger.info("Created basic CSS file")
