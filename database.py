@@ -1,6 +1,8 @@
 import sqlite3
 import os
+import click
 from flask import current_app, g
+from flask.cli import with_appcontext
 
 def get_db():
     """Get database connection with row factory."""
@@ -39,12 +41,19 @@ def init_db():
     
     db.commit()
 
+@click.command('init-db')
+@with_appcontext
+def init_db_command():
+    """Initialize the database."""
+    init_db()
+    print('Initialized the database.')
+
 def init_app(app):
     """Register database functions with the Flask app."""
     app.teardown_appcontext(close_db)
     app.cli.add_command(init_db_command)
 
-def init_db_command():
-    """Initialize the database."""
-    init_db()
-    print('Initialized the database.')
+def ensure_db_directory_exists(app):
+    """Ensure database directory exists."""
+    db_path = app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
