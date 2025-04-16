@@ -1,10 +1,10 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, g, jsonify
+from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, g, jsonify, session
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 import sqlite3, json, os, datetime, logging
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 
-# Create blueprint and initialize logger
+# Create blueprint and set up logging
 web_bp = Blueprint('web', __name__, url_prefix='')
 login_manager = LoginManager()
 logger = logging.getLogger(__name__)
@@ -17,60 +17,110 @@ class User(UserMixin):
 
 def init_app(app):
     """Initialize web interface module with Flask app"""
+    # Set up exception handling
+    app.errorhandler(500)(handle_server_error)
+    app.errorhandler(404)(handle_not_found)
+    
+    # Register blueprint
     app.register_blueprint(web_bp)
     
     # Setup login manager
     login_manager.init_app(app)
     login_manager.login_view = 'web.login'
     
+    # Set up context processor for common template variables
+    app.context_processor(inject_template_variables)
+    
     # Generate necessary templates and static files
     with app.app_context():
-        generate_base_templates()
+        # Ensure database directory exists
+        os.makedirs(os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')), exist_ok=True)
         
-        # Register template filters
-        @app.template_filter('format_file_size')
-        def format_file_size(size):
-            """Format file size in bytes to a readable format"""
-            if not size:
-                return "0 bytes"
-            size = int(size)
-            for unit in ['bytes', 'KB', 'MB', 'GB', 'TB']:
-                if size < 1024.0:
-                    return f"{size:.1f} {unit}"
-                size /= 1024.0
-            return f"{size:.1f} PB"
-            
-        # Register context processors
-        @app.context_processor
-        def inject_common_variables():
-            """Inject common variables into all templates"""
-            return {
-                'app_name': app.config.get('APP_NAME', 'Malware Detonation Platform'),
-                'colors': {
-                    'primary': app.config.get('PRIMARY_COLOR', '#4a6fa5'),
-                    'secondary': app.config.get('SECONDARY_COLOR', '#6c757d'),
-                    'danger': app.config.get('DANGER_COLOR', '#dc3545'),
-                    'success': app.config.get('SUCCESS_COLOR', '#28a745'),
-                    'warning': app.config.get('WARNING_COLOR', '#ffc107'),
-                    'info': app.config.get('INFO_COLOR', '#17a2b8'),
-                    'dark': app.config.get('DARK_COLOR', '#343a40'),
-                    'light': app.config.get('LIGHT_COLOR', '#f8f9fa')
-                },
-                'year': datetime.datetime.now().year
-            }
+        # Ensure the database has been initialized
+        if not os.path.exists(app.config.get('DATABASE_PATH')):
+            init_db(app)
+        
+        # Generate templates
+        generate_base_templates()
+
+def handle_server_error(e):
+    """Handle 500 errors gracefully"""
+    logger.error(f"Server error: {str(e)}")
+    return render_template('error.html', 
+                          error_code=500,
+                          error_message="The server encountered an internal error. Please try again later."), 500
+
+def handle_not_found(e):
+    """Handle 404 errors gracefully"""
+    return render_template('error.html',
+                          error_code=404,
+                          error_message="The requested page was not found."), 404
+
+def inject_template_variables():
+    """Inject common variables into all templates"""
+    return {
+        'app_name': current_app.config.get('APP_NAME', 'Malware Detonation Platform'),
+        'year': datetime.datetime.now().year,
+        'colors': {
+            'primary': current_app.config.get('PRIMARY_COLOR', '#4a6fa5'),
+            'secondary': current_app.config.get('SECONDARY_COLOR', '#6c757d'),
+            'danger': current_app.config.get('DANGER_COLOR', '#dc3545'),
+            'success': current_app.config.get('SUCCESS_COLOR', '#28a745'),
+            'warning': current_app.config.get('WARNING_COLOR', '#ffc107'),
+            'info': current_app.config.get('INFO_COLOR', '#17a2b8'),
+            'dark': current_app.config.get('DARK_COLOR', '#343a40'),
+            'light': current_app.config.get('LIGHT_COLOR', '#f8f9fa')
+        }
+    }
 
 @login_manager.user_loader
 def load_user(user_id):
-    """Load user by ID"""
-    conn = _db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, username, role FROM users WHERE id = ?", (user_id,))
-    user = cursor.fetchone()
-    conn.close()
-    
-    if user:
-        return User(user[0], user[1], user[2])
+    """Load user by ID for Flask-Login"""
+    try:
+        conn = _db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, username, role FROM users WHERE id = ?", (user_id,))
+        user = cursor.fetchone()
+        conn.close()
+        
+        if user:
+            return User(user[0], user[1], user[2])
+    except Exception as e:
+        logger.error(f"Error loading user: {e}")
     return None
+
+def init_db(app):
+    """Initialize the database with schema"""
+    logger.info("Initializing database")
+    try:
+        conn = sqlite3.connect(app.config.get('DATABASE_PATH'))
+        cursor = conn.cursor()
+        
+        # Create users table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        # Create default admin user if no users exist
+        cursor.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute(
+                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                ("admin", generate_password_hash("admin123"), "admin")
+            )
+            logger.info("Created default admin user")
+        
+        conn.commit()
+        conn.close()
+        logger.info("Database initialization complete")
+    except Exception as e:
+        logger.error(f"Database initialization error: {e}")
+        raise
 
 def create_database_schema(cursor):
     """Create database tables"""
@@ -94,10 +144,14 @@ def create_database_schema(cursor):
 
 def _db_connection(row_factory=None):
     """Create a database connection with optional row factory"""
-    conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
-    if row_factory:
-        conn.row_factory = row_factory
-    return conn
+    try:
+        conn = sqlite3.connect(current_app.config.get('DATABASE_PATH'))
+        if row_factory:
+            conn.row_factory = row_factory
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise
 
 def admin_required(f):
     """Decorator to require admin role"""
@@ -118,33 +172,39 @@ def index():
 @web_bp.route('/login', methods=['GET', 'POST'])
 def login():
     """Login page"""
+    # Redirect if already logged in
     if current_user.is_authenticated:
         return redirect(url_for('web.dashboard'))
         
+    error = None
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        remember = 'remember' in request.form
-        
-        conn = _db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, username, password, role FROM users WHERE username = ?", (username,))
-        user_data = cursor.fetchone()
-        conn.close()
-        
-        if user_data and check_password_hash(user_data[2], password):
-            user = User(user_data[0], user_data[1], user_data[3])
-            login_user(user, remember=remember)
+        try:
+            username = request.form.get('username')
+            password = request.form.get('password')
+            remember = 'remember' in request.form
             
-            # Redirect to the original requested page or dashboard
-            next_page = request.args.get('next')
-            if not next_page or not next_page.startswith('/'):
-                next_page = url_for('web.dashboard')
-            return redirect(next_page)
-        
-        flash('Invalid username or password', 'danger')
+            conn = _db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, username, password, role FROM users WHERE username = ?", (username,))
+            user_data = cursor.fetchone()
+            conn.close()
+            
+            if user_data and check_password_hash(user_data[2], password):
+                user = User(user_data[0], user_data[1], user_data[3])
+                login_user(user, remember=remember)
+                
+                # Redirect to the original requested page or dashboard
+                next_page = request.args.get('next')
+                if not next_page or not next_page.startswith('/'):
+                    next_page = url_for('web.dashboard')
+                return redirect(next_page)
+            
+            error = 'Invalid username or password'
+        except Exception as e:
+            logger.error(f"Login error: {e}")
+            error = 'An error occurred during login. Please try again.'
     
-    return render_template('login.html')
+    return render_template('login.html', error=error)
 
 @web_bp.route('/logout')
 @login_required
@@ -159,26 +219,31 @@ def logout():
 def dashboard():
     """Dashboard page"""
     # Get recent data
-    try:
-        from malware_module import get_recent_samples
-        datasets = get_recent_samples(5)
-    except Exception as e:
-        logger.error(f"Error loading recent samples: {e}")
-        datasets = []
-        
-    try:
-        from detonation_module import get_detonation_jobs
-        analyses = get_detonation_jobs()[:5]
-    except Exception as e:
-        logger.error(f"Error loading detonation jobs: {e}")
-        analyses = []
+    datasets = []
+    analyses = []
+    visualizations = []
     
     try:
-        from viz_module import get_visualizations_for_dashboard
-        visualizations = get_visualizations_for_dashboard()
+        # Safe import of modules using try/except
+        try:
+            from malware_module import get_recent_samples
+            datasets = get_recent_samples(5)
+        except Exception as e:
+            logger.error(f"Error loading recent samples: {e}")
+        
+        try:
+            from detonation_module import get_detonation_jobs
+            analyses = get_detonation_jobs()[:5] if len(get_detonation_jobs()) > 0 else []
+        except Exception as e:
+            logger.error(f"Error loading detonation jobs: {e}")
+        
+        try:
+            from viz_module import get_visualizations_for_dashboard
+            visualizations = get_visualizations_for_dashboard()
+        except Exception as e:
+            logger.error(f"Error loading visualizations: {e}")
     except Exception as e:
-        logger.error(f"Error loading visualizations: {e}")
-        visualizations = []
+        logger.error(f"Dashboard data loading error: {e}")
     
     return render_template('dashboard.html', 
                          datasets=datasets, 
@@ -196,11 +261,16 @@ def profile():
 @admin_required
 def users():
     """User management page - admin only"""
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, username, role, created_at FROM users ORDER BY id")
-    users_list = [dict(row) for row in cursor.fetchall()]
-    conn.close()
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, username, role, created_at FROM users ORDER BY id")
+        users_list = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error fetching users: {e}")
+        users_list = []
+        flash("Error loading users", "danger")
     
     return render_template('users.html', users=users_list)
 
@@ -218,110 +288,35 @@ def add_user():
             flash('Username and password are required', 'danger')
             return redirect(url_for('web.add_user'))
         
-        # Check if username already exists
-        conn = _db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
-        if cursor.fetchone():
-            conn.close()
-            flash('Username already exists', 'danger')
-            return redirect(url_for('web.add_user'))
-        
-        # Create new user
         try:
+            # Check if username already exists
+            conn = _db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+            if cursor.fetchone():
+                conn.close()
+                flash('Username already exists', 'danger')
+                return redirect(url_for('web.add_user'))
+            
+            # Create new user
             cursor.execute(
                 "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
                 (username, generate_password_hash(password), role)
             )
             conn.commit()
+            conn.close()
             flash('User created successfully', 'success')
             return redirect(url_for('web.users'))
         except Exception as e:
-            conn.rollback()
-            flash(f'Error creating user: {str(e)}', 'danger')
-        finally:
-            conn.close()
+            logger.error(f"Error creating user: {e}")
+            flash(f'Error creating user', 'danger')
     
     return render_template('user_form.html', user=None)
 
-@web_bp.route('/users/edit/<int:user_id>', methods=['GET', 'POST'])
-@login_required
-@admin_required
-def edit_user(user_id):
-    """Edit user - admin only"""
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, username, role FROM users WHERE id = ?", (user_id,))
-    user = cursor.fetchone()
-    
-    if not user:
-        conn.close()
-        flash('User not found', 'danger')
-        return redirect(url_for('web.users'))
-    
-    user = dict(user)
-    
-    if request.method == 'POST':
-        role = request.form.get('role', 'analyst')
-        password = request.form.get('password')
-        
-        update_fields = ["role = ?"]
-        update_values = [role]
-        
-        if password:
-            update_fields.append("password = ?")
-            update_values.append(generate_password_hash(password))
-        
-        update_values.append(user_id)
-        
-        try:
-            cursor.execute(
-                f"UPDATE users SET {', '.join(update_fields)} WHERE id = ?",
-                update_values
-            )
-            conn.commit()
-            flash('User updated successfully', 'success')
-            return redirect(url_for('web.users'))
-        except Exception as e:
-            conn.rollback()
-            flash(f'Error updating user: {str(e)}', 'danger')
-    
-    conn.close()
-    return render_template('user_form.html', user=user)
-
-@web_bp.route('/users/delete/<int:user_id>', methods=['POST'])
-@login_required
-@admin_required
-def delete_user(user_id):
-    """Delete user - admin only"""
-    # Prevent deleting the current user
-    if user_id == current_user.id:
-        flash('You cannot delete your own account', 'danger')
-        return redirect(url_for('web.users'))
-    
-    conn = _db_connection()
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
-        conn.commit()
-        flash('User deleted successfully', 'success')
-    except Exception as e:
-        conn.rollback()
-        flash(f'Error deleting user: {str(e)}', 'danger')
-    finally:
-        conn.close()
-    
-    return redirect(url_for('web.users'))
-
-@web_bp.route('/api/app-info')
-def api_app_info():
-    """API endpoint for basic app info"""
-    return jsonify({
-        'name': current_app.config.get('APP_NAME', 'Malware Detonation Platform'),
-        'version': current_app.config.get('APP_VERSION', '1.0.0'),
-        'environment': current_app.config.get('ENVIRONMENT', 'production')
-    })
+@web_bp.route('/health')
+def health_check():
+    """Health check endpoint"""
+    return jsonify({"status": "healthy"}), 200
 
 # Template generation
 def generate_base_templates():
@@ -485,6 +480,10 @@ def generate_base_templates():
                 <h2 class="card-title text-center">Login</h2>
             </div>
             <div class="card-body">
+                {% if error %}
+                <div class="alert alert-danger">{{ error }}</div>
+                {% endif %}
+                
                 <form method="POST">
                     <div class="mb-3">
                         <label for="username" class="form-label">Username</label>
@@ -663,7 +662,7 @@ def generate_base_templates():
                     </div>
                 </div>
                 
-                <h4>Account Information</h4>
+                <h4>Change Password</h4>
                 <hr>
                 
                 <form method="POST" action="{{ url_for('web.profile') }}">
@@ -690,114 +689,22 @@ def generate_base_templates():
 </div>
 {% endblock %}""",
 
-        'users.html': """{% extends 'base.html' %}
+        'error.html': """{% extends 'base.html' %}
 
-{% block title %}User Management - {{ app_name }}{% endblock %}
-
-{% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h1>User Management</h1>
-    <a href="{{ url_for('web.add_user') }}" class="btn btn-primary">
-        <i class="fas fa-plus"></i> Add User
-    </a>
-</div>
-
-<div class="card">
-    <div class="card-header bg-primary text-white">
-        <h5 class="card-title mb-0">Users</h5>
-    </div>
-    <div class="card-body">
-        {% if users %}
-            <div class="table-responsive">
-                <table class="table table-striped table-hover">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Username</th>
-                            <th>Role</th>
-                            <th>Created</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for user in users %}
-                        <tr>
-                            <td>{{ user.id }}</td>
-                            <td>{{ user.username }}</td>
-                            <td>
-                                <span class="badge bg-{% if user.role == 'admin' %}danger{% else %}primary{% endif %}">
-                                    {{ user.role }}
-                                </span>
-                            </td>
-                            <td>{{ user.created_at }}</td>
-                            <td>
-                                <a href="{{ url_for('web.edit_user', user_id=user.id) }}" class="btn btn-sm btn-info">
-                                    <i class="fas fa-edit"></i>
-                                </a>
-                                
-                                {% if user.id != current_user.id %}
-                                <form method="POST" action="{{ url_for('web.delete_user', user_id=user.id) }}" class="d-inline">
-                                    <button type="submit" class="btn btn-sm btn-danger" data-confirm="Are you sure you want to delete this user?">
-                                        <i class="fas fa-trash"></i>
-                                    </button>
-                                </form>
-                                {% endif %}
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        {% else %}
-            <div class="alert alert-info">No users found.</div>
-        {% endif %}
-    </div>
-</div>
-{% endblock %}""",
-
-        'user_form.html': """{% extends 'base.html' %}
-
-{% block title %}{% if user %}Edit User{% else %}Add User{% endif %} - {{ app_name }}{% endblock %}
+{% block title %}Error {{ error_code }} - {{ app_name }}{% endblock %}
 
 {% block content %}
-<div class="row justify-content-center">
+<div class="row justify-content-center mt-5">
     <div class="col-md-8">
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h2 class="card-title">{% if user %}Edit User{% else %}Add User{% endif %}</h2>
+        <div class="card text-center">
+            <div class="card-header bg-danger text-white">
+                <h2 class="card-title">Error {{ error_code }}</h2>
             </div>
             <div class="card-body">
-                <form method="POST">
-                    {% if not user %}
-                    <div class="mb-3">
-                        <label for="username" class="form-label">Username</label>
-                        <input type="text" class="form-control" id="username" name="username" required>
-                    </div>
-                    {% else %}
-                    <div class="mb-3">
-                        <label class="form-label">Username</label>
-                        <input type="text" class="form-control" value="{{ user.username }}" disabled>
-                    </div>
-                    {% endif %}
-                    
-                    <div class="mb-3">
-                        <label for="password" class="form-label">{% if user %}New Password (leave blank to keep current){% else %}Password{% endif %}</label>
-                        <input type="password" class="form-control" id="password" name="password" {% if not user %}required{% endif %}>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label for="role" class="form-label">Role</label>
-                        <select class="form-select" id="role" name="role" required>
-                            <option value="analyst" {% if user and user.role == 'analyst' %}selected{% endif %}>Analyst</option>
-                            <option value="admin" {% if user and user.role == 'admin' %}selected{% endif %}>Administrator</option>
-                        </select>
-                    </div>
-                    
-                    <div class="d-flex justify-content-between">
-                        <a href="{{ url_for('web.users') }}" class="btn btn-secondary">Cancel</a>
-                        <button type="submit" class="btn btn-primary">{% if user %}Update{% else %}Create{% endif %} User</button>
-                    </div>
-                </form>
+                <p class="display-1 text-danger"><i class="fas fa-exclamation-triangle"></i></p>
+                <h4>{{ error_message }}</h4>
+                <p class="text-muted">Please try again or contact your system administrator if the problem persists.</p>
+                <a href="/" class="btn btn-primary mt-3">Return to Home</a>
             </div>
         </div>
     </div>
@@ -807,28 +714,35 @@ def generate_base_templates():
     
     static_files = {
         'css/main.css': """/* Main CSS styles */
-body { font-family: 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f8f9fa; }
-.card { box-shadow: 0 2px 4px rgba(0,0,0,0.05); margin-bottom: 20px; border: none; border-radius: 8px; }
-.card-header { border-top-left-radius: 8px !important; border-top-right-radius: 8px !important; }
-.dashboard-stat { padding: 20px; text-align: center; }
-.dashboard-stat i { font-size: 2rem; margin-bottom: 10px; }
-.dashboard-stat h3 { font-size: 1.8rem; margin-bottom: 5px; }
-.hash-value { font-family: monospace; word-break: break-all; }
-.table-responsive { overflow-x: auto; }
-.tag-badge { background-color: #e9ecef; color: #333; padding: 3px 8px; border-radius: 12px; font-size: 0.8rem; margin-right: 5px; margin-bottom: 5px; display: inline-block; }
-.detail-row { border-bottom: 1px solid #e9ecef; padding: 8px 0; }
-.detail-label { font-weight: bold; }
-.viz-container { height: 500px; width: 100%; border-radius: 4px; border: 1px solid #e9ecef; margin-bottom: 20px; }
-.viz-fullscreen { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1050; background: white; padding: 20px; border-radius: 0; }
-footer { margin-top: 50px; padding: 20px 0; border-top: 1px solid #e9ecef; }
-.status-badge { padding: 5px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; }
-.status-queued { background-color: #f8f9fa; color: #6c757d; }
-.status-running { background-color: #cff4fc; color: #0dcaf0; }
-.status-completed { background-color: #d1e7dd; color: #198754; }
-.status-failed { background-color: #f8d7da; color: #dc3545; }
-.status-cancelled { background-color: #fff3cd; color: #ffc107; }
-.loader { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 20px auto; }
-@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }""",
+body { 
+    font-family: 'Helvetica Neue', Arial, sans-serif; 
+    line-height: 1.6; 
+    color: #333; 
+    background-color: #f8f9fa; 
+}
+.card { 
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05); 
+    margin-bottom: 20px; 
+    border: none; 
+    border-radius: 8px; 
+}
+.card-header { 
+    border-top-left-radius: 8px !important; 
+    border-top-right-radius: 8px !important; 
+}
+.hash-value { 
+    font-family: monospace; 
+    word-break: break-all; 
+}
+.table-responsive { 
+    overflow-x: auto; 
+}
+footer { 
+    margin-top: 50px; 
+    padding: 20px 0; 
+    border-top: 1px solid #e9ecef; 
+}
+""",
         
         'js/main.js': """// Main JavaScript
 document.addEventListener('DOMContentLoaded', function() {
@@ -855,49 +769,39 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
-    // Status refresh for detonation jobs
-    const statusElements = document.querySelectorAll('[data-job-id]');
-    if (statusElements.length > 0) {
-        const refreshStatus = function() {
-            statusElements.forEach(el => {
-                const jobId = el.getAttribute('data-job-id');
-                fetch(`/detonation/api/status/${jobId}`)
-                    .then(response => response.json())
-                    .then(data => {
-                        el.textContent = data.status;
-                        el.className = `badge ${'bg-' + (data.status === 'completed' ? 'success' : data.status === 'failed' ? 'danger' : data.status === 'running' ? 'primary' : 'secondary')}`;
-                        if (['completed', 'failed'].includes(data.status) && 
-                            el.getAttribute('data-refresh-on-complete') === 'true') {
-                            window.location.reload();
-                        }
-                    })
-                    .catch(error => console.error('Error fetching status:', error));
-            });
-        };
-        refreshStatus();
-        setInterval(refreshStatus, 10000);
-    }
-    
     // Health check
     setInterval(function() {
-        fetch('/health').then(response => response.json()).catch(error => {});
+        fetch('/health')
+            .then(response => response.json())
+            .catch(error => console.error('Health check error:', error));
     }, 30000);
 });"""
     }
     
-    # Create templates
-    os.makedirs('templates', exist_ok=True)
-    for filename, content in templates_to_generate.items():
-        if not os.path.exists(f'templates/{filename}'):
-            with open(f'templates/{filename}', 'w') as f:
-                f.write(content)
-            logger.info(f"Created template: {filename}")
-    
-    # Create static files
-    for filepath, content in static_files.items():
-        directory = os.path.dirname(f'static/{filepath}')
-        os.makedirs(directory, exist_ok=True)
-        if not os.path.exists(f'static/{filepath}'):
-            with open(f'static/{filepath}', 'w') as f:
-                f.write(content)
-            logger.info(f"Created static file: {filepath}")
+    try:
+        # Create templates directory
+        os.makedirs('templates', exist_ok=True)
+        
+        # Generate templates if they don't exist
+        for template_name, template_content in templates_to_generate.items():
+            if not os.path.exists(f'templates/{template_name}'):
+                with open(f'templates/{template_name}', 'w') as f:
+                    f.write(template_content)
+                logger.info(f"Created template: {template_name}")
+        
+        # Create static files directories
+        os.makedirs('static/css', exist_ok=True)
+        os.makedirs('static/js', exist_ok=True)
+        
+        # Generate static files if they don't exist
+        for filepath, content in static_files.items():
+            if not os.path.exists(f'static/{filepath}'):
+                os.makedirs(os.path.dirname(f'static/{filepath}'), exist_ok=True)
+                with open(f'static/{filepath}', 'w') as f:
+                    f.write(content)
+                logger.info(f"Created static file: {filepath}")
+                
+        logger.info("All templates and static files generated successfully")
+    except Exception as e:
+        logger.error(f"Error generating templates: {e}")
+        raise
