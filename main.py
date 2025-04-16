@@ -13,6 +13,17 @@ MODULES = {
     'web': 'web_interface'
 }
 
+def get_module(module_name):
+    """Get module by name, for inter-module communication"""
+    if module_name not in MODULES:
+        return None
+        
+    try:
+        return importlib.import_module(MODULES[module_name])
+    except ImportError as e:
+        logging.getLogger(__name__).error(f"Error importing module {module_name}: {str(e)}")
+        return None
+
 def create_app(test_config=None):
     """Application factory to create and configure the Flask app"""
     # Create and configure the app
