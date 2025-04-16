@@ -42,19 +42,19 @@ def init_app(app):
         return {
             'app_name': current_app.config['APP_NAME'],
             'colors': {
-                'primary': current_app.config['PRIMARY_COLOR'],
-                'secondary': current_app.config['SECONDARY_COLOR'],
-                'danger': current_app.config['DANGER_COLOR'],
-                'success': current_app.config['SUCCESS_COLOR'],
-                'warning': current_app.config['WARNING_COLOR'],
-                'info': current_app.config['INFO_COLOR'],
-                'dark': current_app.config['DARK_COLOR'],
-                'light': current_app.config['LIGHT_COLOR']
+                'primary': current_app.config.get('PRIMARY_COLOR', '#4a6fa5'),
+                'secondary': current_app.config.get('SECONDARY_COLOR', '#6c757d'),
+                'danger': current_app.config.get('DANGER_COLOR', '#dc3545'),
+                'success': current_app.config.get('SUCCESS_COLOR', '#28a745'),
+                'warning': current_app.config.get('WARNING_COLOR', '#ffc107'),
+                'info': current_app.config.get('INFO_COLOR', '#17a2b8'),
+                'dark': current_app.config.get('DARK_COLOR', '#343a40'),
+                'light': current_app.config.get('LIGHT_COLOR', '#f8f9fa')
             },
             'features': {
-                'advanced_analysis': current_app.config['ENABLE_ADVANCED_ANALYSIS'],
-                'data_export': current_app.config['ENABLE_DATA_EXPORT'],
-                'visualization': current_app.config['ENABLE_VISUALIZATION']
+                'advanced_analysis': current_app.config.get('ENABLE_ADVANCED_ANALYSIS', True),
+                'data_export': current_app.config.get('ENABLE_DATA_EXPORT', True),
+                'visualization': current_app.config.get('ENABLE_VISUALIZATION', True)
             },
             'year': datetime.now().year,
             'user': current_user if not current_user.is_anonymous else None
@@ -252,20 +252,42 @@ def dashboard():
     user_visualizations = []
     
     try:
-        # Get user's datasets
-        from data_module import get_datasets
-        all_datasets = get_datasets()
-        user_datasets = all_datasets[:3]  # Just showing 3 most recent for demo
+        # Try getting datasets from malware_module (new) or data_module (old)
+        try:
+            from malware_module import get_datasets
+            all_datasets = get_datasets()
+            user_datasets = all_datasets[:3]  # Just showing 3 most recent for demo
+        except ImportError:
+            try:
+                from data_module import get_datasets
+                all_datasets = get_datasets()
+                user_datasets = all_datasets[:3]
+            except ImportError:
+                # If neither module is available
+                user_datasets = []
         
-        # Get user's analyses
-        from analysis_module import get_saved_queries
-        all_queries = get_saved_queries()
-        user_analyses = all_queries[:3]  # Just showing 3 most recent for demo
+        # Try getting analyses from detonation_module (new) or analysis_module (old)
+        try:
+            from detonation_module import get_saved_queries
+            all_queries = get_saved_queries()
+            user_analyses = all_queries[:3]
+        except (ImportError, AttributeError):
+            try:
+                from analysis_module import get_saved_queries
+                all_queries = get_saved_queries()
+                user_analyses = all_queries[:3]
+            except (ImportError, AttributeError):
+                # If neither module is available or function doesn't exist
+                user_analyses = []
         
         # Get user's visualizations
-        from viz_module import get_visualizations
-        all_visualizations = get_visualizations()
-        user_visualizations = all_visualizations[:3]  # Just showing 3 most recent for demo
+        try:
+            from viz_module import get_visualizations
+            all_visualizations = get_visualizations()
+            user_visualizations = all_visualizations[:3]
+        except (ImportError, AttributeError):
+            # If viz_module is not available or function doesn't exist
+            user_visualizations = []
     except Exception as e:
         flash(f"Error loading dashboard data: {str(e)}", "error")
     
@@ -376,11 +398,11 @@ def admin():
 # Error handlers
 def handle_404():
     """Handle 404 errors"""
-    return render_template('404.html')
+    return render_template('404.html') if os.path.exists('templates/404.html') else "Page not found", 404
 
 def handle_500():
     """Handle 500 errors"""
-    return render_template('500.html')
+    return render_template('500.html') if os.path.exists('templates/500.html') else "Server error", 500
 
 # Static file generators
 def generate_css():
@@ -391,14 +413,14 @@ def generate_css():
     main_css = """
     /* Main application styling */
     :root {
-        --primary-color: """ + current_app.config['PRIMARY_COLOR'] + """;
-        --secondary-color: """ + current_app.config['SECONDARY_COLOR'] + """;
-        --danger-color: """ + current_app.config['DANGER_COLOR'] + """;
-        --success-color: """ + current_app.config['SUCCESS_COLOR'] + """;
-        --warning-color: """ + current_app.config['WARNING_COLOR'] + """;
-        --info-color: """ + current_app.config['INFO_COLOR'] + """;
-        --dark-color: """ + current_app.config['DARK_COLOR'] + """;
-        --light-color: """ + current_app.config['LIGHT_COLOR'] + """;
+        --primary-color: """ + current_app.config.get('PRIMARY_COLOR', '#4a6fa5') + """;
+        --secondary-color: """ + current_app.config.get('SECONDARY_COLOR', '#6c757d') + """;
+        --danger-color: """ + current_app.config.get('DANGER_COLOR', '#dc3545') + """;
+        --success-color: """ + current_app.config.get('SUCCESS_COLOR', '#28a745') + """;
+        --warning-color: """ + current_app.config.get('WARNING_COLOR', '#ffc107') + """;
+        --info-color: """ + current_app.config.get('INFO_COLOR', '#17a2b8') + """;
+        --dark-color: """ + current_app.config.get('DARK_COLOR', '#343a40') + """;
+        --light-color: """ + current_app.config.get('LIGHT_COLOR', '#f8f9fa') + """;
     }
 
     body {
@@ -706,606 +728,30 @@ def generate_base_templates():
     """Generate the base HTML templates for the application"""
     os.makedirs('templates', exist_ok=True)
     
-    # Base template with common layout
-    base_html = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{% block title %}{{ app_name }}{% endblock %}</title>
-        
-        <!-- Bootstrap CSS -->
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <!-- Font Awesome -->
-        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-        <!-- Custom CSS -->
-        <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
-        <link href="{{ url_for('static', filename='css/data_module.css') }}" rel="stylesheet">
-        <link href="{{ url_for('static', filename='css/analysis_module.css') }}" rel="stylesheet">
-        <link href="{{ url_for('static', filename='css/viz_module.css') }}" rel="stylesheet">
-        
-        {% block styles %}{% endblock %}
-    </head>
-    <body>
-        <!-- Navigation -->
-        <nav class="navbar navbar-expand-lg navbar-dark">
-            <div class="container-fluid">
-                <a class="navbar-brand" href="{{ url_for('web.index') }}">
-                    <i class="fas fa-shield-alt me-2"></i>{{ app_name }}
-                </a>
-                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                    <span class="navbar-toggler-icon"></span>
-                </button>
-                <div class="collapse navbar-collapse" id="navbarNav">
-                    <ul class="navbar-nav me-auto">
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('web.index') }}">
-                                <i class="fas fa-home me-1"></i>Home
-                            </a>
-                        </li>
-                        {% if current_user.is_authenticated %}
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('web.dashboard') }}">
-                                <i class="fas fa-tachometer-alt me-1"></i>Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('data.index') }}">
-                                <i class="fas fa-database me-1"></i>Data
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('analysis.index') }}">
-                                <i class="fas fa-search me-1"></i>Analysis
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('viz.index') }}">
-                                <i class="fas fa-chart-bar me-1"></i>Visualization
-                            </a>
-                        </li>
-                        {% endif %}
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('web.about') }}">
-                                <i class="fas fa-info-circle me-1"></i>About
-                            </a>
-                        </li>
-                    </ul>
-                    
-                    <ul class="navbar-nav">
-                        {% if current_user.is_authenticated %}
-                        <li class="nav-item dropdown">
-                            <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-                                <i class="fas fa-user-circle me-1"></i>{{ current_user.username }}
-                                {% if current_user.role == 'admin' %}
-                                <span class="user-badge">Admin</span>
-                                {% endif %}
-                            </a>
-                            <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userDropdown">
-                                <li><a class="dropdown-item" href="{{ url_for('web.profile') }}"><i class="fas fa-id-card me-2"></i>Profile</a></li>
-                                {% if current_user.role == 'admin' %}
-                                <li><a class="dropdown-item" href="{{ url_for('web.admin') }}"><i class="fas fa-users-cog me-2"></i>Admin</a></li>
-                                {% endif %}
-                                <li><hr class="dropdown-divider"></li>
-                                <li><a class="dropdown-item" href="{{ url_for('web.logout') }}"><i class="fas fa-sign-out-alt me-2"></i>Logout</a></li>
-                            </ul>
-                        </li>
-                        {% else %}
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('web.login') }}">
-                                <i class="fas fa-sign-in-alt me-1"></i>Login
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('web.register') }}">
-                                <i class="fas fa-user-plus me-1"></i>Register
-                            </a>
-                        </li>
-                        {% endif %}
-                    </ul>
-                </div>
-            </div>
-        </nav>
-        
-        <!-- Main Content -->
-        <main class="main-content py-4">
-            {% block content %}{% endblock %}
-        </main>
-        
-        <!-- Footer -->
-        <footer class="footer">
-            <div class="container">
-                <div class="row">
-                    <div class="col-md-6">
-                        <h5>{{ app_name }}</h5>
-                        <p>A modern platform for security analysts to craft and test hunt hypotheses.</p>
-                    </div>
-                    <div class="col-md-3">
-                        <h5>Navigation</h5>
-                        <ul class="list-unstyled">
-                            <li><a href="{{ url_for('web.index') }}" class="text-white">Home</a></li>
-                            {% if current_user.is_authenticated %}
-                            <li><a href="{{ url_for('data.index') }}" class="text-white">Data</a></li>
-                            <li><a href="{{ url_for('analysis.index') }}" class="text-white">Analysis</a></li>
-                            <li><a href="{{ url_for('viz.index') }}" class="text-white">Visualization</a></li>
-                            {% endif %}
-                        </ul>
-                    </div>
-                    <div class="col-md-3">
-                        <h5>Resources</h5>
-                        <ul class="list-unstyled">
-                            <li><a href="{{ url_for('web.about') }}" class="text-white">About</a></li>
-                            <li><a href="#" class="text-white">Documentation</a></li>
-                            <li><a href="#" class="text-white">Support</a></li>
-                        </ul>
-                    </div>
-                </div>
-                <div class="row mt-3">
-                    <div class="col-12 text-center">
-                        <p class="mb-0">&copy; {{ year }} {{ app_name }}. All rights reserved.</p>
+    # Create a simple index.html template if it doesn't exist
+    if not os.path.exists('templates/index.html'):
+        index_html = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Malware Detonation Platform</title>
+            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+        </head>
+        <body>
+            <div class="container mt-5">
+                <div class="text-center">
+                    <h1>Malware Detonation Platform</h1>
+                    <p class="lead">A platform for security analysts to analyze and detonate malware samples.</p>
+                    <div class="mt-4">
+                        <a href="/login" class="btn btn-primary">Login</a>
+                        <a href="/register" class="btn btn-outline-primary">Register</a>
                     </div>
                 </div>
             </div>
-        </footer>
-        
-        <!-- Bootstrap JS Bundle with Popper -->
-        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-        <!-- Main JS -->
-        <script src="{{ url_for('static', filename='js/main.js') }}"></script>
-        
-        {% block scripts %}{% endblock %}
-    </body>
-    </html>
-    """
-    
-    # Login page template
-    login_html = """
-    {% extends 'base.html' %}
-    
-    {% block title %}Login - {{ app_name }}{% endblock %}
-    
-    {% block content %}
-    <div class="container">
-        <div class="card auth-card">
-            <div class="card-body">
-                <div class="auth-header">
-                    <i class="fas fa-sign-in-alt"></i>
-                    <h2>Login</h2>
-                    <p class="text-muted">Enter your credentials to access your account</p>
-                </div>
-                
-                {% with messages = get_flashed_messages(with_categories=true) %}
-                  {% if messages %}
-                    {% for category, message in messages %}
-                      <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
-                        {{ message }}
-                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-                      </div>
-                    {% endfor %}
-                  {% endif %}
-                {% endwith %}
-                
-                <form method="POST" action="{{ url_for('web.login') }}">
-                    <div class="mb-3">
-                        <label for="username" class="form-label">Username</label>
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="fas fa-user"></i></span>
-                            <input type="text" class="form-control" id="username" name="username" required>
-                        </div>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label for="password" class="form-label">Password</label>
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="fas fa-lock"></i></span>
-                            <input type="password" class="form-control" id="password" name="password" required>
-                        </div>
-                    </div>
-                    
-                    <div class="mb-3 form-check">
-                        <input type="checkbox" class="form-check-input" id="remember" name="remember">
-                        <label class="form-check-label" for="remember">Remember me</label>
-                    </div>
-                    
-                    <div class="d-grid">
-                        <button type="submit" class="btn btn-primary">Login</button>
-                    </div>
-                </form>
-                
-                <div class="auth-footer">
-                    <p>Don't have an account? <a href="{{ url_for('web.register') }}">Register</a></p>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    """
-    
-    # Register page template
-    register_html = """
-    {% extends 'base.html' %}
-    
-    {% block title %}Register - {{ app_name }}{% endblock %}
-    
-    {% block content %}
-    <div class="container">
-        <div class="card auth-card">
-            <div class="card-body">
-                <div class="auth-header">
-                    <i class="fas fa-user-plus"></i>
-                    <h2>Create Account</h2>
-                    <p class="text-muted">Join the {{ app_name }} platform</p>
-                </div>
-                
-                {% with messages = get_flashed_messages(with_categories=true) %}
-                  {% if messages %}
-                    {% for category, message in messages %}
-                      <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
-                        {{ message }}
-                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-                      </div>
-                    {% endfor %}
-                  {% endif %}
-                {% endwith %}
-                
-                <form method="POST" action="{{ url_for('web.register') }}">
-                    <div class="mb-3">
-                        <label for="username" class="form-label">Username</label>
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="fas fa-user"></i></span>
-                            <input type="text" class="form-control" id="username" name="username" required>
-                        </div>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label for="email" class="form-label">Email</label>
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="fas fa-envelope"></i></span>
-                            <input type="email" class="form-control" id="email" name="email" required>
-                        </div>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label for="password" class="form-label">Password</label>
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="fas fa-lock"></i></span>
-                            <input type="password" class="form-control" id="password" name="password" required>
-                        </div>
-                        <div id="password-strength" class="form-text"></div>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label for="password_confirm" class="form-label">Confirm Password</label>
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="fas fa-lock"></i></span>
-                            <input type="password" class="form-control" id="password_confirm" name="password_confirm" required>
-                        </div>
-                    </div>
-                    
-                    <div class="d-grid">
-                        <button type="submit" class="btn btn-primary">Register</button>
-                    </div>
-                </form>
-                
-                <div class="auth-footer">
-                    <p>Already have an account? <a href="{{ url_for('web.login') }}">Login</a></p>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    
-    {% block scripts %}
-    <style>
-        .password-strength {
-            margin-top: 0.5rem;
-            font-weight: bold;
-        }
-        .password-strength.weak { color: var(--danger-color); }
-        .password-strength.medium { color: var(--warning-color); }
-        .password-strength.strong { color: var(--success-color); }
-    </style>
-    {% endblock %}
-    """
-    
-    # Profile page template
-    profile_html = """
-    {% extends 'base.html' %}
-    
-    {% block title %}My Profile - {{ app_name }}{% endblock %}
-    
-    {% block content %}
-    <div class="profile-header">
-        <div class="container text-center">
-            <div class="profile-avatar">
-                <i class="fas fa-user"></i>
-            </div>
-            <h2>{{ current_user.username }}</h2>
-            <p class="lead">{{ current_user.email }}</p>
-            <p>
-                <span class="badge bg-info">{{ current_user.role|title }}</span>
-            </p>
-        </div>
-    </div>
-    
-    <div class="container">
-        {% with messages = get_flashed_messages(with_categories=true) %}
-          {% if messages %}
-            {% for category, message in messages %}
-              <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
-                {{ message }}
-                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-              </div>
-            {% endfor %}
-          {% endif %}
-        {% endwith %}
-        
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h4 class="mb-0">Account Information</h4>
-                    </div>
-                    <div class="card-body">
-                        <form method="POST" action="#">
-                            <div class="mb-3">
-                                <label for="username" class="form-label">Username</label>
-                                <input type="text" class="form-control" id="username" value="{{ current_user.username }}" readonly>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label for="email" class="form-label">Email</label>
-                                <input type="email" class="form-control" id="email" value="{{ current_user.email }}">
-                            </div>
-                            
-                            <button type="submit" class="btn btn-primary">Update Profile</button>
-                        </form>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-6">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h4 class="mb-0">Change Password</h4>
-                    </div>
-                    <div class="card-body">
-                        <form method="POST" action="#">
-                            <div class="mb-3">
-                                <label for="current_password" class="form-label">Current Password</label>
-                                <input type="password" class="form-control" id="current_password" name="current_password" required>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label for="new_password" class="form-label">New Password</label>
-                                <input type="password" class="form-control" id="new_password" name="new_password" required>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label for="confirm_password" class="form-label">Confirm New Password</label>
-                                <input type="password" class="form-control" id="confirm_password" name="confirm_password" required>
-                            </div>
-                            
-                            <button type="submit" class="btn btn-primary">Change Password</button>
-                        </form>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="card mb-4">
-            <div class="card-header">
-                <h4 class="mb-0">Activity Summary</h4>
-            </div>
-            <div class="card-body">
-                <div class="row text-center">
-                    <div class="col-md-4">
-                        <div class="p-3">
-                            <i class="fas fa-database fa-2x mb-2 text-primary"></i>
-                            <h4>5</h4>
-                            <p class="text-muted">Datasets</p>
-                        </div>
-                    </div>
-                    <div class="col-md-4">
-                        <div class="p-3">
-                            <i class="fas fa-search fa-2x mb-2 text-primary"></i>
-                            <h4>12</h4>
-                            <p class="text-muted">Analyses</p>
-                        </div>
-                    </div>
-                    <div class="col-md-4">
-                        <div class="p-3">
-                            <i class="fas fa-chart-bar fa-2x mb-2 text-primary"></i>
-                            <h4>8</h4>
-                            <p class="text-muted">Visualizations</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    """
-    
-    # Admin page template
-    admin_html = """
-    {% extends 'base.html' %}
-    
-    {% block title %}Admin Dashboard - {{ app_name }}{% endblock %}
-    
-    {% block content %}
-    <div class="container">
-        <h1 class="mb-4">Admin Dashboard</h1>
-        
-        {% with messages = get_flashed_messages(with_categories=true) %}
-          {% if messages %}
-            {% for category, message in messages %}
-              <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
-                {{ message }}
-                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-              </div>
-            {% endfor %}
-          {% endif %}
-        {% endwith %}
-        
-        <div class="row mb-4">
-            <div class="col-md-3">
-                <div class="card text-center p-3">
-                    <div class="p-3 mb-2">
-                        <i class="fas fa-users fa-3x text-primary"></i>
-                    </div>
-                    <h4>{{ users|length }}</h4>
-                    <p class="text-muted">Total Users</p>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card text-center p-3">
-                    <div class="p-3 mb-2">
-                        <i class="fas fa-database fa-3x text-primary"></i>
-                    </div>
-                    <h4>10</h4>
-                    <p class="text-muted">Total Datasets</p>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card text-center p-3">
-                    <div class="p-3 mb-2">
-                        <i class="fas fa-search fa-3x text-primary"></i>
-                    </div>
-                    <h4>25</h4>
-                    <p class="text-muted">Total Analyses</p>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card text-center p-3">
-                    <div class="p-3 mb-2">
-                        <i class="fas fa-chart-bar fa-3x text-primary"></i>
-                    </div>
-                    <h4>18</h4>
-                    <p class="text-muted">Total Visualizations</p>
-                </div>
-            </div>
-        </div>
-        
-        <div class="card mb-4">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h4 class="mb-0">User Management</h4>
-                <button class="btn btn-primary btn-sm">
-                    <i class="fas fa-user-plus"></i> Add User
-                </button>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Username</th>
-                                <th>Email</th>
-                                <th>Role</th>
-                                <th>Created</th>
-                                <th>Last Login</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for user in users %}
-                            <tr>
-                                <td>{{ user.id }}</td>
-                                <td>{{ user.username }}</td>
-                                <td>{{ user.email }}</td>
-                                <td>
-                                    <span class="badge bg-{{ 'danger' if user.role == 'admin' else 'primary' }}">
-                                        {{ user.role }}
-                                    </span>
-                                </td>
-                                <td>{{ user.created_at|format_date }}</td>
-                                <td>{{ user.last_login|format_date if user.last_login else 'Never' }}</td>
-                                <td>
-                                    <div class="btn-group btn-group-sm">
-                                        <button class="btn btn-outline-primary"><i class="fas fa-edit"></i></button>
-                                        <button class="btn btn-outline-danger"><i class="fas fa-trash"></i></button>
-                                    </div>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-        
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h4 class="mb-0">System Settings</h4>
-                    </div>
-                    <div class="card-body">
-                        <form method="POST" action="#">
-                            <div class="mb-3">
-                                <label for="app_name" class="form-label">Application Name</label>
-                                <input type="text" class="form-control" id="app_name" value="{{ app_name }}">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label for="primary_color" class="form-label">Primary Color</label>
-                                <input type="color" class="form-control form-control-color" id="primary_color" value="{{ colors.primary }}">
-                            </div>
-                            
-                            <div class="mb-3 form-check">
-                                <input type="checkbox" class="form-check-input" id="enable_registration" checked>
-                                <label class="form-check-label" for="enable_registration">Enable User Registration</label>
-                            </div>
-                            
-                            <button type="submit" class="btn btn-primary">Save Settings</button>
-                        </form>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h4 class="mb-0">System Information</h4>
-                    </div>
-                    <div class="card-body">
-                        <dl class="row">
-                            <dt class="col-sm-5">Application Version:</dt>
-                            <dd class="col-sm-7">1.0.0</dd>
-                            
-                            <dt class="col-sm-5">Flask Version:</dt>
-                            <dd class="col-sm-7">2.3.3</dd>
-                            
-                            <dt class="col-sm-5">Python Version:</dt>
-                            <dd class="col-sm-7">3.11.4</dd>
-                            
-                            <dt class="col-sm-5">Database:</dt>
-                            <dd class="col-sm-7">SQLite 3</dd>
-                            
-                            <dt class="col-sm-5">Operating System:</dt>
-                            <dd class="col-sm-7">Linux</dd>
-                            
-                            <dt class="col-sm-5">Server Time:</dt>
-                            <dd class="col-sm-7">{{ now|format_datetime }}</dd>
-                        </dl>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    """
-    
-    # Write the templates to files
-    templates = {
-        'base.html': base_html,
-        'login.html': login_html,
-        'register.html': register_html,
-        'profile.html': profile_html,
-        'admin.html': admin_html,
-    }
-    
-    for file_name, content in templates.items():
-        with open(f'templates/{file_name}', 'w') as f:
-            f.write(content)
+        </body>
+        </html>
+        """
+        with open('templates/index.html', 'w') as f:
+            f.write(index_html)
