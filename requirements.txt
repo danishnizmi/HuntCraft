@@ -3,6 +3,7 @@ Flask==2.3.3
 Werkzeug==2.3.7
 Jinja2==3.1.2
 gunicorn==21.2.0
+Flask-Login==0.6.2
 
 # Database
 SQLAlchemy==2.0.20
@@ -14,7 +15,9 @@ google-cloud-compute==1.12.0
 google-cloud-logging==3.5.0
 google-cloud-monitoring==2.15.0
 google-cloud-secret-manager==2.16.2
+google-cloud-pubsub==2.18.4
 google-auth==2.22.0
+google-cloud-functions==1.13.1
 
 # Data processing
 pandas==2.0.3
@@ -23,10 +26,20 @@ numpy==1.24.4
 # Security and file analysis
 python-magic==0.4.27
 
+# Visualization
+plotly==5.15.0
+
+# Utilities
+requests==2.31.0
+urllib3==2.0.4
+six==1.16.0
+python-dateutil==2.8.2
+pytz==2023.3
+
 # Commenting out packages that require compilation and are causing build failures
 # pefile==2023.2.7
 # yara-python==4.3.1
 # ssdeep==3.4
 # oletools==0.60.1
 
-# The rest of your requirements...
+# hashlib is part of the Python standard library, no need to specify it
