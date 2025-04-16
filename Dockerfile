@@ -1,65 +1,58 @@
 # Use Python 3.11 slim as base image
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive \
-    PORT=8080
+    DEBIAN_FRONTEND=noninteractive
 
-# Set working directory
-WORKDIR /app
+# Set working directory for builder
+WORKDIR /build
 
-# Install system dependencies
+# Install build dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
     libfuzzy-dev \
     libssl-dev \
     pkg-config \
-    libmagic1 \
-    curl \
-    ca-certificates \
-    git \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies with fixed versions
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir \
-    Flask==2.3.3 \
-    Werkzeug==2.3.7 \
-    Jinja2==3.1.2 \
-    gunicorn==21.2.0 \
-    Flask-Login==0.6.2 \
-    # Database
-    SQLAlchemy==2.0.20 \
-    psycopg2-binary==2.9.7 \
-    # GCP libraries - fixed dependency conflict
-    google-cloud-storage==2.10.0 \
-    google-cloud-compute==1.12.0 \
-    google-cloud-logging==3.5.0 \
-    google-cloud-monitoring==2.15.0 \
-    google-cloud-secret-manager==2.16.2 \
-    google-cloud-pubsub==2.18.4 \
-    google-auth==2.23.0 \
-    google-cloud-functions==1.13.1 \
-    # Data processing
-    pandas==2.0.3 \
-    numpy==1.24.4 \
-    # Security and file analysis
-    python-magic==0.4.27 \
-    # Visualization
-    plotly==5.15.0 \
-    # Utilities
-    requests==2.31.0 \
-    urllib3==1.26.16 \
-    six==1.16.0 \
-    python-dateutil==2.8.2 \
-    pytz==2023.3
+# Copy requirements.txt separately for better caching
+COPY requirements.txt .
 
-# Copy application code
-COPY . .
+# Install Python dependencies with fixed versions in a virtual environment
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+# Second stage for runtime - slimmer final image
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    PATH="/opt/venv/bin:$PATH" \
+    GENERATE_TEMPLATES=false \
+    GUNICORN_WORKERS=1 \
+    GUNICORN_TIMEOUT=300
+
+# Set working directory
+WORKDIR /app
+
+# Install runtime dependencies only
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libmagic1 \
+    curl \
+    ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy virtual environment from builder stage
+COPY --from=builder /opt/venv /opt/venv
 
 # Create stub modules for problematic packages
 RUN mkdir -p /app/stubs && \
@@ -68,60 +61,80 @@ RUN mkdir -p /app/stubs && \
     echo 'class Entry:\n    def __init__(self, *args, **kwargs):\n        self.dll = "stub.dll"\n        self.imports = []\n\nclass PE:\n    def __init__(self, *args, **kwargs):\n        self.DIRECTORY_ENTRY_IMPORT = [Entry()]\n        self.DIRECTORY_ENTRY_EXPORT = []\n    def close(self):\n        pass' > /app/stubs/pefile.py && \
     touch /app/stubs/__init__.py
 
-# Create a Python startup script to modify imports
-RUN echo 'import sys\nsys.path.insert(0, "/app/stubs")\n' > /app/sitecustomize.py
-
 # Set PYTHONPATH to include stubs
 ENV PYTHONPATH=/app:/app/stubs:$PYTHONPATH
 
-# Create necessary directories
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser -d /app appuser
+
+# Create necessary directories and set permissions
 RUN mkdir -p /app/data/uploads && \
     mkdir -p /app/data/database && \
     mkdir -p /app/static/css && \
     mkdir -p /app/static/js && \
     mkdir -p /app/templates && \
-    chmod -R 755 /app/data
+    chown -R appuser:appuser /app
+
+# Copy application code
+COPY --chown=appuser:appuser . .
+
+# Pre-generate templates during build time
+RUN mkdir -p /app/templates && python -c "import os; os.environ['GENERATE_TEMPLATES'] = 'true'; \
+    from flask import Flask; \
+    app = Flask(__name__); \
+    app.config['GENERATE_TEMPLATES'] = True; \
+    app.config['DATABASE_PATH'] = '/app/data/malware_platform.db'; \
+    app.config['UPLOAD_FOLDER'] = '/app/data/uploads'; \
+    with app.app_context(): \
+        try: \
+            import web_interface; \
+            web_interface.generate_base_templates(); \
+            web_interface.generate_css(); \
+            web_interface.generate_js(); \
+            import malware_module; \
+            malware_module.generate_templates(); \
+            malware_module.generate_css(); \
+            malware_module.generate_js(); \
+            import viz_module; \
+            viz_module.generate_templates(); \
+            viz_module.generate_css(); \
+            viz_module.generate_js(); \
+        except Exception as e: \
+            print(f'Error generating templates: {e}')" || echo "Template generation failed but continuing"
+
+# Switch to non-root user for security
+USER appuser
 
 # Set environment variables for runtime
 ENV DATABASE_PATH=/app/data/malware_platform.db \
     UPLOAD_FOLDER=/app/data/uploads \
     MAX_UPLOAD_SIZE_MB=100 \
-    DEBUG=true
+    DEBUG=false
 
 # Create a startup wrapper script
 RUN echo '#!/bin/bash\n\
 echo "Starting application initialization..."\n\
 echo "Python version:"\n\
 python --version\n\
-echo "Installed packages:"\n\
-pip list\n\
-echo "Working directory: $(pwd)"\n\
-echo "Files in current directory:"\n\
-ls -la\n\
 \n\
 # Create and verify directories\n\
 mkdir -p /app/data/uploads\n\
 mkdir -p /app/static/css\n\
 mkdir -p /app/static/js\n\
 mkdir -p /app/templates\n\
-echo "Directory structure:"\n\
-find /app -type d | sort\n\
 \n\
-# Test imports\n\
-echo "Testing key imports..."\n\
-python -c "import os; print(f\\"Python path: {os.environ.get(\\"PYTHONPATH\\")}\\")" || echo "PYTHONPATH test failed"\n\
-python -c "import sys; print(f\\"Python sys.path: {sys.path}\\")" || echo "sys.path test failed"\n\
-python -c "import flask; print(f\\"Flask version: {flask.__version__}\\")" || echo "Flask import failed"\n\
-python -c "import main; print(\\"Main module imported successfully\\")" || echo "Main module import failed"\n\
+# Get the number of workers from env or default to 1\n\
+WORKERS=${GUNICORN_WORKERS:-1}\n\
+TIMEOUT=${GUNICORN_TIMEOUT:-120}\n\
 \n\
-echo "Starting Gunicorn server..."\n\
+echo "Starting Gunicorn server with $WORKERS workers, timeout $TIMEOUT seconds..."\n\
 exec gunicorn --bind 0.0.0.0:$PORT \
-    --workers=1 \
+    --workers=$WORKERS \
     --threads=4 \
-    --timeout=120 \
+    --timeout=$TIMEOUT \
     --access-logfile=- \
     --error-logfile=- \
-    --log-level=debug \
+    --log-level=info \
     "main:create_app()"' > /app/start.sh && \
     chmod +x /app/start.sh
 
