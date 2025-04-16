@@ -16,39 +16,14 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest']
 
-  # Create service account if it doesn't exist
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        gcloud iam service-accounts describe malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com 2>/dev/null || \
-        gcloud iam service-accounts create malware-platform-sa \
-          --display-name="Malware Detonation Platform Service Account"
-
-  # Grant necessary permissions to the service account
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        for role in roles/storage.admin roles/pubsub.editor roles/compute.admin roles/secretmanager.secretAccessor; do
-          gcloud projects add-iam-policy-binding $PROJECT_ID \
-            --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-            --role="$$role" || echo "Already has $$role"
-        done
-
   # Create Pub/Sub topic and subscription
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        gcloud pubsub topics describe detonation-notifications --project=$PROJECT_ID 2>/dev/null || \
-        gcloud pubsub topics create detonation-notifications --project=$PROJECT_ID
-        
-        gcloud pubsub subscriptions describe detonation-app-sub --project=$PROJECT_ID 2>/dev/null || \
-        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications --project=$PROJECT_ID
+        gcloud pubsub topics create detonation-notifications || true
+        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications || true
 
   # Create storage buckets
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -56,27 +31,8 @@ steps:
     args:
       - '-c'
       - |
-        gsutil ls -p $PROJECT_ID gs://malware-samples-$PROJECT_ID 2>/dev/null || \
-        gsutil mb -p $PROJECT_ID -l ${_REGION} gs://malware-samples-$PROJECT_ID
-        
-        gsutil ls -p $PROJECT_ID gs://detonation-results-$PROJECT_ID 2>/dev/null || \
-        gsutil mb -p $PROJECT_ID -l ${_REGION} gs://detonation-results-$PROJECT_ID
-
-  # Create Secret Manager secret for app key if it doesn't exist
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        if ! gcloud secrets describe malware-platform-secrets --project=$PROJECT_ID 2>/dev/null; then
-          echo "Creating secret..."
-          echo -n "$$RANDOM-$$RANDOM-$$RANDOM-$$RANDOM" | gcloud secrets create malware-platform-secrets --data-file=- --project=$PROJECT_ID
-          
-          gcloud secrets add-iam-policy-binding malware-platform-secrets \
-            --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-            --role="roles/secretmanager.secretAccessor" \
-            --project=$PROJECT_ID
-        fi
+        gsutil mb -l ${_REGION} gs://malware-samples-$PROJECT_ID || true
+        gsutil mb -l ${_REGION} gs://detonation-results-$PROJECT_ID || true
 
   # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -89,16 +45,10 @@ steps:
       - '--region=${_REGION}'
       - '--platform=managed'
       - '--allow-unauthenticated'
-      - '--service-account=malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com'
-      - '--memory=2Gi'
-      - '--cpu=2'
-      - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=${_REGION},GCP_ZONE=${_REGION}-a,GCP_STORAGE_BUCKET=malware-samples-$PROJECT_ID,GCP_RESULTS_BUCKET=detonation-results-$PROJECT_ID,APP_NAME=Malware Detonation Platform,DEBUG=false'
-      - '--set-secrets=SECRET_KEY=malware-platform-secrets:latest'
 
 # Configuration options
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_8'
 
 # Images to push
 images:
