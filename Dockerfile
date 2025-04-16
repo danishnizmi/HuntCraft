@@ -112,7 +112,7 @@ echo "Testing key imports..."\n\
 python -c "import os; print(f\\"Python path: {os.environ.get(\\"PYTHONPATH\\")}\\")" || echo "PYTHONPATH test failed"\n\
 python -c "import sys; print(f\\"Python sys.path: {sys.path}\\")" || echo "sys.path test failed"\n\
 python -c "import flask; print(f\\"Flask version: {flask.__version__}\\")" || echo "Flask import failed"\n\
-python -c "import stubs.ssdeep as ssdeep; h = ssdeep.hash(); print(f\\"ssdeep stub imported: {h.digest()}\\")" || echo "ssdeep stub import failed"\n\
+python -c "import main; print(\\"Main module imported successfully\\")" || echo "Main module import failed"\n\
 \n\
 echo "Starting Gunicorn server..."\n\
 exec gunicorn --bind 0.0.0.0:$PORT \
@@ -122,8 +122,6 @@ exec gunicorn --bind 0.0.0.0:$PORT \
     --access-logfile=- \
     --error-logfile=- \
     --log-level=debug \
-    --preload \
-    --reload \
     "main:create_app()"' > /app/start.sh && \
     chmod +x /app/start.sh
 
