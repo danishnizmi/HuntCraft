@@ -1,10 +1,7 @@
 from flask import Blueprint, request, render_template, current_app, jsonify, flash, redirect, url_for
-import sqlite3, json, time, logging, uuid, os
+import sqlite3, json, time, logging, uuid, os, threading
 from datetime import datetime
-import threading
 from google.cloud import compute_v1, storage, pubsub_v1
-from google.cloud.functions_v1 import CloudFunctionsServiceClient
-from google.cloud import monitoring_v3
 
 # Blueprint and logging setup
 detonation_bp = Blueprint('detonation', __name__, url_prefix='/detonation')
@@ -15,16 +12,14 @@ def init_app(app):
     """Initialize module with Flask app"""
     app.register_blueprint(detonation_bp)
     with app.app_context():
-        # Generate CSS/JS
         os.makedirs('static/css', exist_ok=True)
         os.makedirs('static/js', exist_ok=True)
         os.makedirs('templates', exist_ok=True)
+        generate_templates()
         
-        # Ensure detonation_topic exists in Pub/Sub
-        ensure_pubsub_topic()
-        
-        # Set up Pub/Sub subscription if running in production
+        # Set up Pub/Sub if running in production
         if app.config.get('ON_CLOUD_RUN', False):
+            ensure_pubsub_topic()
             setup_pubsub_subscription()
 
 def create_database_schema(cursor):
@@ -98,7 +93,7 @@ def setup_pubsub_subscription():
                 request={"name": subscription_path, "topic": topic_path}
             )
         
-        # Set up message handler
+        # Set up message handler and start subscriber in a separate thread
         def callback(message):
             try:
                 data = json.loads(message.data.decode('utf-8'))
@@ -111,13 +106,10 @@ def setup_pubsub_subscription():
                 logger.error(f"Error handling Pub/Sub message: {e}")
                 message.nack()
         
-        # Start subscriber in a separate thread
         def run_subscriber():
             try:
                 streaming_pull_future = subscriber.subscribe(subscription_path, callback)
                 logger.info(f"Pub/Sub subscription active: {subscription_path}")
-                
-                # Handle errors
                 streaming_pull_future.result()
             except Exception as e:
                 logger.error(f"Pub/Sub subscription error: {e}")
@@ -218,7 +210,7 @@ def api_status(job_id):
 def create_detonation_job(sample_id, vm_type):
     """Create a new detonation job and start VM deployment via GCP"""
     # Check if maximum concurrent detonations reached
-    max_concurrent = current_app.config['MAX_CONCURRENT_DETONATIONS']
+    max_concurrent = current_app.config.get('MAX_CONCURRENT_DETONATIONS', 5)
     if len(active_jobs) >= max_concurrent:
         raise ValueError(f"Maximum concurrent detonations ({max_concurrent}) reached")
     
@@ -240,10 +232,6 @@ def create_detonation_job(sample_id, vm_type):
     finally:
         conn.close()
     
-    # Start the GCP-based detonation process
-    from malware_module import get_malware_by_id
-    sample = get_malware_by_id(sample_id)
-    
     # Track active job
     active_jobs[job_id] = {'job_uuid': job_uuid, 'status': 'queued'}
     
@@ -252,6 +240,8 @@ def create_detonation_job(sample_id, vm_type):
     
     # Start VM deployment using instance template
     try:
+        from malware_module import get_malware_by_id
+        sample = get_malware_by_id(sample_id)
         deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type)
     except Exception as e:
         update_job_status(job_id, 'failed', error_message=str(e))
@@ -298,7 +288,7 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
                 {"key": "sample-path", "value": sample['storage_path']},
                 {"key": "results-bucket", "value": current_app.config['GCP_RESULTS_BUCKET']},
                 {"key": "job-id", "value": str(job_id)},
-                {"key": "detonation-timeout", "value": str(current_app.config['DETONATION_TIMEOUT_MINUTES'])},
+                {"key": "detonation-timeout", "value": str(current_app.config.get('DETONATION_TIMEOUT_MINUTES', 30))},
                 {"key": "project-id", "value": project_id}
             ]
         },
@@ -322,22 +312,19 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
         error_messages = [error.message for error in operation.error.errors]
         raise Exception(f"VM creation failed: {', '.join(error_messages)}")
     
-    # Set up a job to check for completion
+    # Set up job monitoring and update job status to running
     setup_job_monitoring(job_id, vm_name)
-    
-    # Update job status to running
     update_job_status(job_id, 'running', started_at=str(time.time()))
     logger.info(f"Detonation VM {vm_name} deployed for job {job_id}")
 
 def setup_job_monitoring(job_id, vm_name):
-    """Configure monitoring for the detonation job using GCP Cloud Functions and Pub/Sub"""
+    """Configure monitoring for the detonation job using Pub/Sub"""
     project_id = current_app.config['GCP_PROJECT_ID']
     
-    # Create a Pub/Sub publisher
+    # Create a Pub/Sub publisher and publish monitoring message
     publisher = pubsub_v1.PublisherClient()
     topic_path = publisher.topic_path(project_id, 'detonation-notifications')
     
-    # Publish a message to set up monitoring
     message_data = json.dumps({
         'action': 'monitor',
         'job_id': job_id,
@@ -412,7 +399,6 @@ def notify_job_completed(job_id, status):
     except Exception as e:
         logger.error(f"Error publishing completion notification: {e}")
 
-# This function would be registered as a Pub/Sub subscriber to handle job updates
 def handle_job_update(message):
     """Process job update notifications from Pub/Sub"""
     try:
@@ -435,8 +421,6 @@ def handle_job_update(message):
             if results_path:
                 update_fields.append("results_path = ?")
                 update_values.append(results_path)
-                
-                # Process results
                 process_detonation_results(job_id, results_path)
         
         elif status == 'failed':
@@ -446,7 +430,6 @@ def handle_job_update(message):
         # Add job_id to update values
         update_values.append(job_id)
         
-        # Execute the query
         query = f"UPDATE detonation_jobs SET {', '.join(update_fields)} WHERE id = ?"
         cursor.execute(query, update_values)
         conn.commit()
@@ -549,8 +532,9 @@ def delete_detonation_job(job_id):
             bucket = storage_client.bucket(current_app.config['GCP_RESULTS_BUCKET'])
             
             # Delete all blobs with the job prefix
-            for blob in bucket.list_blobs(prefix=f"jobs/{job['job_uuid']}/"):
-                blob.delete()
+            blobs = list(bucket.list_blobs(prefix=f"jobs/{job['job_uuid']}/"))
+            if blobs:
+                bucket.delete_blobs(blobs)
                 
             logger.info(f"Deleted GCS results for job {job_id}")
         except Exception as e:
@@ -645,3 +629,380 @@ def get_jobs_for_sample(sample_id):
     
     conn.close()
     return jobs
+
+# Template generation
+def generate_templates():
+    """Generate detonation module templates if not present"""
+    templates = {
+        'detonation_index.html': """{% extends 'base.html' %}
+{% block title %}Detonation Jobs{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>Detonation Jobs</h1>
+    <div>
+        <a href="{{ url_for('malware.index') }}" class="btn btn-outline-primary">
+            <i class="fas fa-plus"></i> New Detonation
+        </a>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Active VMs: <span class="badge bg-primary">{{ active_vm_count }}</span></h5>
+        </div>
+    </div>
+    <div class="card-body">
+        {% if jobs %}
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Sample</th>
+                            <th>VM Type</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for job in jobs %}
+                        <tr>
+                            <td>{{ job.id }}</td>
+                            <td>
+                                <a href="{{ url_for('malware.view', sample_id=job.sample_id) }}">
+                                    {{ job.sample_name }}
+                                </a>
+                            </td>
+                            <td>{{ job.vm_type }}</td>
+                            <td>
+                                <span class="badge {% if job.status == 'completed' %}bg-success{% elif job.status == 'failed' %}bg-danger{% elif job.status == 'running' %}bg-primary{% else %}bg-secondary{% endif %}" 
+                                      data-job-id="{{ job.id }}">
+                                    {{ job.status }}
+                                </span>
+                            </td>
+                            <td>{{ job.created_at }}</td>
+                            <td>
+                                <a href="{{ url_for('detonation.view', job_id=job.id) }}" 
+                                   class="btn btn-sm btn-info">
+                                    <i class="fas fa-eye"></i>
+                                </a>
+                                
+                                {% if job.status in ['queued', 'deploying', 'running'] %}
+                                <form method="POST" action="{{ url_for('detonation.cancel', job_id=job.id) }}" 
+                                      class="d-inline">
+                                    <button type="submit" class="btn btn-sm btn-warning" 
+                                            data-confirm="Are you sure you want to cancel this job?">
+                                        <i class="fas fa-stop"></i>
+                                    </button>
+                                </form>
+                                {% endif %}
+                                
+                                <form method="POST" action="{{ url_for('detonation.delete', job_id=job.id) }}" 
+                                      class="d-inline">
+                                    <button type="submit" class="btn btn-sm btn-danger" 
+                                            data-confirm="Are you sure you want to delete this job?">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <div class="alert alert-info">
+                No detonation jobs found. Start by selecting a malware sample to detonate.
+            </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}""",
+
+        'detonation_view.html': """{% extends 'base.html' %}
+{% block title %}Detonation Job #{{ job.id }}{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>Detonation Job #{{ job.id }}</h1>
+    <div>
+        <a href="{{ url_for('detonation.index') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left"></i> Back to Jobs
+        </a>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Job Details</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tr>
+                        <th>Status:</th>
+                        <td>
+                            <span class="badge {% if job.status == 'completed' %}bg-success{% elif job.status == 'failed' %}bg-danger{% elif job.status == 'running' %}bg-primary{% else %}bg-secondary{% endif %}" 
+                                  data-job-id="{{ job.id }}" 
+                                  data-refresh-on-complete="true">
+                                {{ job.status }}
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Sample:</th>
+                        <td>
+                            <a href="{{ url_for('malware.view', sample_id=job.sample_id) }}">
+                                {{ sample.name }}
+                            </a>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>VM Type:</th>
+                        <td>{{ job.vm_type }}</td>
+                    </tr>
+                    <tr>
+                        <th>VM Name:</th>
+                        <td>{{ job.vm_name or 'N/A' }}</td>
+                    </tr>
+                    <tr>
+                        <th>Created:</th>
+                        <td>{{ job.created_at }}</td>
+                    </tr>
+                    <tr>
+                        <th>Started:</th>
+                        <td>{{ job.started_at or 'N/A' }}</td>
+                    </tr>
+                    <tr>
+                        <th>Completed:</th>
+                        <td>{{ job.completed_at or 'N/A' }}</td>
+                    </tr>
+                    {% if job.error_message %}
+                    <tr>
+                        <th>Error:</th>
+                        <td class="text-danger">{{ job.error_message }}</td>
+                    </tr>
+                    {% endif %}
+                </table>
+                
+                <div class="mt-3">
+                    {% if job.status in ['queued', 'deploying', 'running'] %}
+                    <form method="POST" action="{{ url_for('detonation.cancel', job_id=job.id) }}" class="d-inline">
+                        <button type="submit" class="btn btn-warning" 
+                                data-confirm="Are you sure you want to cancel this job?">
+                            <i class="fas fa-stop"></i> Cancel Job
+                        </button>
+                    </form>
+                    {% endif %}
+                    
+                    <form method="POST" action="{{ url_for('detonation.delete', job_id=job.id) }}" class="d-inline">
+                        <button type="submit" class="btn btn-danger" 
+                                data-confirm="Are you sure you want to delete this job?">
+                            <i class="fas fa-trash"></i> Delete Job
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Sample Information</h5>
+            </div>
+            <div class="card-body">
+                <p><strong>SHA256:</strong> <span class="hash-value">{{ sample.sha256 }}</span></p>
+                <p><strong>Type:</strong> {{ sample.file_type }}</p>
+                <p><strong>Size:</strong> {{ sample.file_size }}</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        {% if job.status == 'completed' and results %}
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Detonation Results</h5>
+            </div>
+            <div class="card-body">
+                {% for result in results %}
+                    {% if result.result_type == 'summary' %}
+                        <h6>Summary</h6>
+                        <table class="table table-sm">
+                            {% for key, value in result.result_data.items() %}
+                            <tr>
+                                <th>{{ key|title }}</th>
+                                <td>
+                                    {% if value is string %}
+                                        {{ value }}
+                                    {% elif value is mapping %}
+                                        <pre>{{ value }}</pre>
+                                    {% elif value is iterable and value is not string %}
+                                        <ul class="mb-0">
+                                            {% for item in value %}
+                                            <li>{{ item }}</li>
+                                            {% endfor %}
+                                        </ul>
+                                    {% else %}
+                                        {{ value }}
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </table>
+                    {% endif %}
+                {% endfor %}
+                
+                <div class="text-center mt-3">
+                    <a href="#" class="btn btn-primary">
+                        <i class="fas fa-download"></i> Download Full Results
+                    </a>
+                </div>
+            </div>
+        </div>
+        {% elif job.status == 'running' %}
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Detonation In Progress</h5>
+            </div>
+            <div class="card-body text-center">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-3">The sample is currently being analyzed in a secure environment. 
+                   This page will automatically update when results are available.</p>
+            </div>
+        </div>
+        {% elif job.status == 'failed' %}
+        <div class="card">
+            <div class="card-header bg-danger text-white">
+                <h5 class="card-title mb-0">Detonation Failed</h5>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-danger">
+                    <i class="fas fa-exclamation-triangle"></i> 
+                    {{ job.error_message or 'An unknown error occurred during the detonation process.' }}
+                </div>
+                <p>Please try again or use a different VM environment for this sample.</p>
+            </div>
+        </div>
+        {% else %}
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Results</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">Results will be available once the detonation process completes.</p>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Auto-refresh for running jobs
+    {% if job.status in ['queued', 'deploying', 'running'] %}
+    setTimeout(function() {
+        window.location.reload();
+    }, 30000);
+    {% endif %}
+</script>
+{% endblock %}""",
+
+        'detonation_create.html': """{% extends 'base.html' %}
+{% block title %}Create Detonation Job{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>Create Detonation Job</h1>
+    <div>
+        <a href="{{ url_for('malware.view', sample_id=sample.id) }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left"></i> Back to Sample
+        </a>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Sample Information</h5>
+            </div>
+            <div class="card-body">
+                <h5>{{ sample.name }}</h5>
+                <p class="text-muted">{{ sample.description }}</p>
+                
+                <p><strong>SHA256:</strong> <span class="hash-value">{{ sample.sha256 }}</span></p>
+                <p><strong>Type:</strong> {{ sample.file_type }}</p>
+                <p><strong>Size:</strong> {{ sample.file_size }}</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Detonation Options</h5>
+            </div>
+            <div class="card-body">
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="vm_type" class="form-label">Select VM Environment</label>
+                        <select class="form-select" id="vm_type" name="vm_type" required>
+                            <option value="windows-10-x64">Windows 10 (x64)</option>
+                            <option value="windows-7-x64">Windows 7 (x64)</option>
+                            <option value="ubuntu-20-04">Ubuntu 20.04</option>
+                        </select>
+                        <div class="form-text text-muted">
+                            Select the most appropriate environment for this malware sample.
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="confirm" required>
+                            <label class="form-check-label" for="confirm">
+                                I understand this will execute potentially malicious code in an isolated environment.
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-flask"></i> Start Detonation
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card mt-4">
+    <div class="card-header">
+        <h5 class="card-title mb-0">Detonation Process Information</h5>
+    </div>
+    <div class="card-body">
+        <ol>
+            <li>The sample will be uploaded to a secure, isolated virtual machine.</li>
+            <li>Monitoring tools will be started to capture system changes, network traffic, and behavior.</li>
+            <li>The sample will be executed with appropriate privileges.</li>
+            <li>All actions will be logged and analyzed.</li>
+            <li>Results will be available once the detonation process completes.</li>
+        </ol>
+        <div class="alert alert-warning">
+            <i class="fas fa-exclamation-triangle"></i> 
+            The detonation process may take several minutes to complete. Please be patient.
+        </div>
+    </div>
+</div>
+{% endblock %}"""
+    }
+    
+    # Create templates
+    for filename, content in templates.items():
+        if not os.path.exists(f'templates/{filename}'):
+            with open(f'templates/{filename}', 'w') as f:
+                f.write(content)
