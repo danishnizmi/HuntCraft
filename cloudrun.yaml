@@ -1,0 +1,49 @@
+# Cloud Run configuration for Malware Detonation Platform
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: malware-detonation-platform
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: "10"
+        autoscaling.knative.dev/minScale: "1"
+    spec:
+      serviceAccountName: malware-platform-sa@${PROJECT_ID}.iam.gserviceaccount.com
+      containers:
+      - image: gcr.io/${PROJECT_ID}/malware-detonation-platform:latest
+        resources:
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+        env:
+          - name: DEBUG
+            value: "false"
+          - name: GCP_PROJECT_ID
+            value: "${PROJECT_ID}"
+          - name: GCP_STORAGE_BUCKET
+            value: "malware-samples-${PROJECT_ID}"
+          - name: GCP_RESULTS_BUCKET
+            value: "detonation-results-${PROJECT_ID}"
+          - name: GCP_REGION
+            value: "us-central1"
+          - name: GCP_ZONE
+            value: "us-central1-a"
+          - name: VM_NETWORK
+            value: "detonation-network"
+          - name: VM_SUBNET
+            value: "detonation-subnet"
+          - name: SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: malware-platform-secrets
+                key: secret-key
+          - name: DATABASE_PATH
+            value: "/app/data/malware_platform.db"
+          - name: MAX_UPLOAD_SIZE_MB
+            value: "100"
+          - name: APP_NAME
+            value: "Malware Detonation Platform"
+        ports:
+          - containerPort: 8080
