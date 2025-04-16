@@ -3,11 +3,18 @@ steps:
   # Build the Docker image
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA', '.']
-    timeout: '1200s'  # 20 minutes to allow for potential slow builds
+    timeout: '1200s'
 
-  # Push the image to Container Registry
+  # Tag the image as latest
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['tag', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA', 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest']
+
+  # Push the images to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest']
 
   # Create service account if it doesn't exist
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -15,7 +22,7 @@ steps:
     args:
       - '-c'
       - |
-        gcloud iam service-accounts describe malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com || \
+        gcloud iam service-accounts describe malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com 2>/dev/null || \
         gcloud iam service-accounts create malware-platform-sa \
           --display-name="Malware Detonation Platform Service Account"
 
@@ -31,33 +38,49 @@ steps:
             --role="$$role" || echo "Already has $$role"
         done
 
-  # Setup required GCP resources
+  # Create Pub/Sub topic and subscription
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        # Create Pub/Sub topics and subscriptions
-        gcloud pubsub topics create detonation-notifications --project=$PROJECT_ID || true
-        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications --project=$PROJECT_ID || true
+        gcloud pubsub topics describe detonation-notifications --project=$PROJECT_ID 2>/dev/null || \
+        gcloud pubsub topics create detonation-notifications --project=$PROJECT_ID
         
-        # Create storage buckets
-        gsutil mb -l ${_REGION} gs://malware-samples-$PROJECT_ID || true
-        gsutil mb -l ${_REGION} gs://detonation-results-$PROJECT_ID || true
+        gcloud pubsub subscriptions describe detonation-app-sub --project=$PROJECT_ID 2>/dev/null || \
+        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications --project=$PROJECT_ID
+
+  # Create storage buckets
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gsutil ls -p $PROJECT_ID gs://malware-samples-$PROJECT_ID 2>/dev/null || \
+        gsutil mb -p $PROJECT_ID -l ${_REGION} gs://malware-samples-$PROJECT_ID
         
-        # Create Secret Manager secret for app key if it doesn't exist
-        SECRET_EXISTS=$(gcloud secrets list --filter="name:malware-platform-secrets" --format="value(name)" | wc -l)
-        if [ $SECRET_EXISTS -eq 0 ]; then
+        gsutil ls -p $PROJECT_ID gs://detonation-results-$PROJECT_ID 2>/dev/null || \
+        gsutil mb -p $PROJECT_ID -l ${_REGION} gs://detonation-results-$PROJECT_ID
+
+  # Create Secret Manager secret for app key if it doesn't exist
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if ! gcloud secrets describe malware-platform-secrets --project=$PROJECT_ID 2>/dev/null; then
           echo "Creating secret..."
-          echo -n "$(openssl rand -base64 32)" | gcloud secrets create malware-platform-secrets --data-file=-
+          echo -n "$$RANDOM-$$RANDOM-$$RANDOM-$$RANDOM" | gcloud secrets create malware-platform-secrets --data-file=- --project=$PROJECT_ID
+          
           gcloud secrets add-iam-policy-binding malware-platform-secrets \
             --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-            --role="roles/secretmanager.secretAccessor"
+            --role="roles/secretmanager.secretAccessor" \
+            --project=$PROJECT_ID
         fi
 
   # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
+    entrypoint: 'gcloud'
     args:
       - 'run'
       - 'deploy'
@@ -72,12 +95,12 @@ steps:
       - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=${_REGION},GCP_ZONE=${_REGION}-a,GCP_STORAGE_BUCKET=malware-samples-$PROJECT_ID,GCP_RESULTS_BUCKET=detonation-results-$PROJECT_ID,APP_NAME=Malware Detonation Platform,DEBUG=false'
       - '--set-secrets=SECRET_KEY=malware-platform-secrets:latest'
 
-# Fix for the service account and logging issue
+# Configuration options
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_8'  # More powerful machine for faster builds
+  machineType: 'E2_HIGHCPU_8'
 
-# Tag the produced images
+# Images to push
 images:
   - 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA'
   - 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest'
@@ -86,5 +109,5 @@ images:
 substitutions:
   _REGION: us-central1
 
-# Maximum build timeout
-timeout: '1800s'  # 30 minutes total
+# Build timeout
+timeout: '1800s'
