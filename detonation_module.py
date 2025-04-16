@@ -1,6 +1,7 @@
 from flask import Blueprint, request, render_template, current_app, jsonify, flash, redirect, url_for
 import sqlite3, json, time, logging, uuid, os
 from datetime import datetime
+import threading
 from google.cloud import compute_v1, storage, pubsub_v1
 from google.cloud.functions_v1 import CloudFunctionsServiceClient
 from google.cloud import monitoring_v3
@@ -21,6 +22,10 @@ def init_app(app):
         
         # Ensure detonation_topic exists in Pub/Sub
         ensure_pubsub_topic()
+        
+        # Set up Pub/Sub subscription if running in production
+        if app.config.get('ON_CLOUD_RUN', False):
+            setup_pubsub_subscription()
 
 def create_database_schema(cursor):
     """Create database tables"""
@@ -53,6 +58,10 @@ def ensure_pubsub_topic():
     """Ensure the Pub/Sub topic for detonation notifications exists"""
     try:
         project_id = current_app.config['GCP_PROJECT_ID']
+        if not project_id:
+            logger.warning("Cannot set up Pub/Sub: No project ID configured")
+            return
+            
         publisher = pubsub_v1.PublisherClient()
         topic_path = publisher.topic_path(project_id, 'detonation-notifications')
         
@@ -62,15 +71,63 @@ def ensure_pubsub_topic():
         except Exception:
             publisher.create_topic(request={"name": topic_path})
             logger.info("Created detonation PubSub topic")
+    except Exception as e:
+        logger.error(f"Error setting up PubSub topic: {e}")
+
+def setup_pubsub_subscription():
+    """Set up Pub/Sub subscription for job updates"""
+    try:
+        project_id = current_app.config['GCP_PROJECT_ID']
+        if not project_id:
+            logger.warning("Cannot set up Pub/Sub: No project ID configured")
+            return
             
-            # Create subscription for this app
-            subscriber = pubsub_v1.SubscriberClient()
-            subscription_path = subscriber.subscription_path(project_id, 'detonation-app-sub')
+        # Create subscriber client
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path(project_id, 'detonation-app-sub')
+        
+        try:
+            # Check if subscription exists
+            subscriber.get_subscription(request={"subscription": subscription_path})
+            logger.info(f"Pub/Sub subscription already exists: {subscription_path}")
+        except Exception:
+            # Subscription doesn't exist, try to create it
+            logger.info(f"Creating new Pub/Sub subscription: {subscription_path}")
+            topic_path = f"projects/{project_id}/topics/detonation-notifications"
             subscriber.create_subscription(
                 request={"name": subscription_path, "topic": topic_path}
             )
+        
+        # Set up message handler
+        def callback(message):
+            try:
+                data = json.loads(message.data.decode('utf-8'))
+                logger.info(f"Received Pub/Sub message: {data}")
+                
+                if data.get('action') == 'job_update':
+                    handle_job_update(message)
+                message.ack()
+            except Exception as e:
+                logger.error(f"Error handling Pub/Sub message: {e}")
+                message.nack()
+        
+        # Start subscriber in a separate thread
+        def run_subscriber():
+            try:
+                streaming_pull_future = subscriber.subscribe(subscription_path, callback)
+                logger.info(f"Pub/Sub subscription active: {subscription_path}")
+                
+                # Handle errors
+                streaming_pull_future.result()
+            except Exception as e:
+                logger.error(f"Pub/Sub subscription error: {e}")
+                
+        thread = threading.Thread(target=run_subscriber)
+        thread.daemon = True
+        thread.start()
+        
     except Exception as e:
-        logger.error(f"Error setting up PubSub topic: {e}")
+        logger.error(f"Error setting up Pub/Sub subscription: {e}")
 
 # Routes
 @detonation_bp.route('/')
