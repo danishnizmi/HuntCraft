@@ -49,10 +49,7 @@ spec:
           - name: MAX_CONCURRENT_DETONATIONS
             value: "3"
           - name: SECRET_KEY
-            valueFrom:
-              secretKeyRef:
-                name: malware-platform-secrets
-                key: secret-key
+            value: "production-secret-key-${PROJECT_ID}"
           - name: DATABASE_PATH
             value: "/app/data/malware_platform.db"
           - name: MAX_UPLOAD_SIZE_MB
