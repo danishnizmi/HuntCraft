@@ -24,8 +24,7 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies (without using requirements.txt)
-# Core framework
+# Install Python dependencies with fixed versions
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
     Flask==2.3.3 \
@@ -36,14 +35,14 @@ RUN pip install --no-cache-dir --upgrade pip && \
     # Database
     SQLAlchemy==2.0.20 \
     psycopg2-binary==2.9.7 \
-    # GCP libraries
+    # GCP libraries - fixed dependency conflict
     google-cloud-storage==2.10.0 \
     google-cloud-compute==1.12.0 \
     google-cloud-logging==3.5.0 \
     google-cloud-monitoring==2.15.0 \
     google-cloud-secret-manager==2.16.2 \
     google-cloud-pubsub==2.18.4 \
-    google-auth==2.22.0 \
+    google-auth==2.23.0 \  # Updated to newer version that supports urllib3 2.0+
     google-cloud-functions==1.13.1 \
     # Data processing
     pandas==2.0.3 \
