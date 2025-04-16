@@ -7,16 +7,25 @@ spec:
   template:
     metadata:
       annotations:
+        # Increase the timeout to allow for slower initialization
         autoscaling.knative.dev/maxScale: "10"
-        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/minScale: "0"
+        # Add startup probe to give more time for app to initialize
+        run.googleapis.com/startup-probe-period-seconds: "30"
+        # Add liveness probe to detect and recover from deadlocks
+        run.googleapis.com/liveness-probe-period-seconds: "30"
     spec:
       serviceAccountName: malware-platform-sa@${PROJECT_ID}.iam.gserviceaccount.com
       containers:
       - image: gcr.io/${PROJECT_ID}/malware-detonation-platform:latest
+        # Increase resources significantly to handle memory-intensive operations
         resources:
           limits:
-            cpu: "2"
-            memory: "2Gi"
+            cpu: "4"
+            memory: "4Gi" # Doubled from 2Gi
+          requests:
+            cpu: "1"
+            memory: "1Gi"
         env:
           - name: DEBUG
             value: "false"
@@ -34,6 +43,20 @@ spec:
             value: "detonation-network"
           - name: VM_SUBNET
             value: "detonation-subnet"
+          # Add env var to prevent generating templates at runtime
+          - name: GENERATE_TEMPLATES
+            value: "false"
+          # Reduce concurrent worker processes for Gunicorn
+          - name: GUNICORN_WORKERS
+            value: "1"
+          # Increase worker timeout
+          - name: GUNICORN_TIMEOUT
+            value: "300"
+          # Configure connection pooling to prevent DB connection exhaustion
+          - name: DB_POOL_SIZE
+            value: "5"
+          - name: MAX_CONCURRENT_DETONATIONS
+            value: "3"
           - name: SECRET_KEY
             valueFrom:
               secretKeyRef:
@@ -47,3 +70,27 @@ spec:
             value: "Malware Detonation Platform"
         ports:
           - containerPort: 8080
+        # Define startup probe
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 10
+        # Define liveness probe
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 300
+          periodSeconds: 30
+          timeoutSeconds: 4
+          failureThreshold: 3
+        # Add readiness probe
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 4
