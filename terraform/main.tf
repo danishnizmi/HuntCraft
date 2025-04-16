@@ -1,3 +1,4 @@
+# GCP provider configuration
 provider "google" {
   project = var.project_id
   region  = var.region
@@ -13,57 +14,53 @@ variable "project_id" {
 variable "region" {
   description = "GCP Region"
   default     = "us-central1"
-  type        = string
 }
 
 variable "zone" {
   description = "GCP Zone"
   default     = "us-central1-a"
-  type        = string
 }
 
-# Network resources for VM isolation
-resource "google_compute_network" "detonation_network" {
-  name                    = "detonation-network"
-  auto_create_subnetworks = false
+variable "app_name" {
+  description = "Application name"
+  default     = "malware-detonation-platform"
 }
 
-resource "google_compute_subnetwork" "detonation_subnet" {
-  name          = "detonation-subnet"
-  ip_cidr_range = "10.0.0.0/24"
-  region        = var.region
-  network       = google_compute_network.detonation_network.id
+variable "detonation_timeout_minutes" {
+  description = "Maximum time for detonation jobs in minutes"
+  default     = 60
 }
 
-# Firewall rule for VM analysis tools
-resource "google_compute_firewall" "allow_internal" {
-  name    = "allow-internal"
-  network = google_compute_network.detonation_network.id
-  
-  allow {
-    protocol = "tcp"
-  }
-  allow {
-    protocol = "udp"
-  }
-  allow {
-    protocol = "icmp"
-  }
-  
-  source_ranges = ["10.0.0.0/24"]
+variable "enable_windows_detonation" {
+  description = "Whether to enable Windows detonation VMs"
+  default     = true
+}
+
+variable "enable_linux_detonation" {
+  description = "Whether to enable Linux detonation VMs"
+  default     = true
+}
+
+variable "max_concurrent_detonations" {
+  description = "Maximum number of concurrent detonation jobs"
+  default     = 5
+}
+
+variable "use_preemptible_vms" {
+  description = "Use preemptible VMs for cost savings"
+  default     = false
 }
 
 # Storage buckets
 resource "google_storage_bucket" "malware_samples" {
   name          = "malware-samples-${var.project_id}"
   location      = var.region
-  force_destroy = true
-  
+  force_destroy = false
   uniform_bucket_level_access = true
   
   lifecycle_rule {
     condition {
-      age = 90
+      age = 90  # Auto-delete after 90 days
     }
     action {
       type = "Delete"
@@ -74,13 +71,12 @@ resource "google_storage_bucket" "malware_samples" {
 resource "google_storage_bucket" "detonation_results" {
   name          = "detonation-results-${var.project_id}"
   location      = var.region
-  force_destroy = true
-  
+  force_destroy = false
   uniform_bucket_level_access = true
   
   lifecycle_rule {
     condition {
-      age = 30
+      age = 30  # Auto-delete after 30 days
     }
     action {
       type = "Delete"
@@ -88,7 +84,7 @@ resource "google_storage_bucket" "detonation_results" {
   }
 }
 
-# Pub/Sub for notifications
+# PubSub for detonation notifications
 resource "google_pubsub_topic" "detonation_notifications" {
   name = "detonation-notifications"
 }
@@ -97,199 +93,222 @@ resource "google_pubsub_subscription" "detonation_app_sub" {
   name  = "detonation-app-sub"
   topic = google_pubsub_topic.detonation_notifications.name
   
-  ack_deadline_seconds = 60
+  ack_deadline_seconds = 20
   
-  expiration_policy {
-    ttl = "" # Never expire
+  retry_policy {
+    minimum_backoff = "10s"
+    maximum_backoff = "600s"
   }
-}
-
-# Service accounts
-resource "google_service_account" "malware_platform_sa" {
-  account_id   = "malware-platform-sa"
-  display_name = "Malware Detonation Platform Service Account"
-}
-
-resource "google_service_account" "detonation_vm_sa" {
-  account_id   = "detonation-vm"
-  display_name = "VM Service Account for Malware Detonation"
-}
-
-# IAM bindings
-resource "google_project_iam_member" "malware_platform_sa_bindings" {
-  for_each = toset([
-    "roles/storage.admin",
-    "roles/pubsub.editor",
-    "roles/compute.admin",
-    "roles/secretmanager.secretAccessor"
-  ])
   
+  # Expire messages that aren't acknowledged after 7 days
+  message_retention_duration = "604800s"
+}
+
+# Service account for detonation VMs
+resource "google_service_account" "detonation_service_account" {
+  account_id   = "detonation-service"
+  display_name = "Malware Detonation Service Account"
+}
+
+# Grant permissions to service account
+resource "google_project_iam_member" "compute_admin" {
   project = var.project_id
-  role    = each.key
-  member  = "serviceAccount:${google_service_account.malware_platform_sa.email}"
+  role    = "roles/compute.admin"
+  member  = "serviceAccount:${google_service_account.detonation_service_account.email}"
 }
 
-resource "google_project_iam_member" "detonation_vm_sa_bindings" {
-  for_each = toset([
-    "roles/storage.objectAdmin",
-    "roles/pubsub.publisher"
-  ])
-  
+resource "google_project_iam_member" "storage_admin" {
   project = var.project_id
-  role    = each.key
-  member  = "serviceAccount:${google_service_account.detonation_vm_sa.email}"
+  role    = "roles/storage.admin"
+  member  = "serviceAccount:${google_service_account.detonation_service_account.email}"
 }
 
-# Secret for app key
-resource "google_secret_manager_secret" "secret_key" {
-  secret_id = "malware-platform-secret-key"
+resource "google_project_iam_member" "pubsub_publisher" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${google_service_account.detonation_service_account.email}"
+}
+
+# Firewall rules for detonation VMs
+resource "google_compute_firewall" "detonation_internal" {
+  name    = "detonation-internal"
+  network = "default"
   
-  replication {
-    automatic = true
+  # Only allow internal network traffic
+  source_ranges = ["10.0.0.0/8"]
+  
+  allow {
+    protocol = "icmp"
   }
-}
-
-resource "google_secret_manager_secret_version" "secret_key_version" {
-  secret      = google_secret_manager_secret.secret_key.id
-  secret_data = random_password.app_secret.result
-}
-
-resource "random_password" "app_secret" {
-  length  = 32
-  special = true
-}
-
-# VM instance templates for different OS types
-resource "google_compute_instance_template" "windows_10_template" {
-  name        = "detonation-win10-template"
-  description = "Windows 10 VM template for malware detonation"
   
-  machine_type = "e2-medium"
+  allow {
+    protocol = "tcp"
+    ports    = ["22", "3389"]  # SSH and RDP
+  }
+  
+  target_tags = ["detonation-vm"]
+}
+
+resource "google_compute_firewall" "detonation_egress" {
+  name    = "detonation-egress"
+  network = "default"
+  direction = "EGRESS"
+  
+  # Allow outbound traffic to Google APIs and Cloud Storage
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+  
+  destination_ranges = ["35.190.247.13/32", "35.191.0.0/16", "130.211.0.0/22"]
+  target_tags = ["detonation-vm"]
+}
+
+# Windows VM Instance Template
+resource "google_compute_instance_template" "detonation_win10_template" {
+  count        = var.enable_windows_detonation ? 1 : 0
+  name_prefix  = "detonation-win10-"
+  machine_type = "n1-standard-2"
   
   disk {
-    source_image = "windows-cloud/windows-10-pro-x64"
+    source_image = "projects/windows-cloud/global/images/family/windows-2019"
     auto_delete  = true
     boot         = true
-    disk_type    = "pd-balanced"
     disk_size_gb = 50
+    disk_type    = "pd-ssd"
   }
   
   network_interface {
-    network    = google_compute_network.detonation_network.id
-    subnetwork = google_compute_subnetwork.detonation_subnet.id
-  }
-  
-  service_account {
-    email  = google_service_account.detonation_vm_sa.email
-    scopes = ["cloud-platform"]
+    network = "default"
+    access_config {} # Ephemeral IP
   }
   
   metadata = {
-    windows-startup-script-ps1 = file("${path.module}/scripts/windows_detonation_setup.ps1")
+    enable-guest-attributes = "TRUE"
+    windows-startup-script-ps1 = <<-EOT
+      # Install analysis tools
+      mkdir C:\Tools
+      # Download SysInternals
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      Invoke-WebRequest -Uri "https://download.sysinternals.com/files/SysinternalsSuite.zip" -OutFile "C:\Tools\SysinternalsSuite.zip"
+      Expand-Archive -Path "C:\Tools\SysinternalsSuite.zip" -DestinationPath "C:\Tools"
+      
+      # Create detonation directory
+      mkdir C:\detonation
+      
+      # Install Google Cloud SDK
+      Invoke-WebRequest -Uri "https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe" -OutFile "C:\GoogleCloudSDKInstaller.exe"
+      Start-Process -FilePath "C:\GoogleCloudSDKInstaller.exe" -ArgumentList "/S /noreporting /nostartmenu /nodesktop" -Wait
+      
+      # Install Process Monitor
+      & "C:\Tools\Procmon.exe" /AcceptEula
+      
+      # Set up auto-cleanup script
+      $cleanupScript = @"
+      # Cleanup script
+      Remove-Item -Path C:\detonation\* -Recurse -Force
+      "@
+      
+      Set-Content -Path "C:\cleanup.ps1" -Value $cleanupScript
+    EOT
   }
   
-  tags = ["detonation-vm", "windows-10"]
+  scheduling {
+    automatic_restart   = false
+    on_host_maintenance = var.use_preemptible_vms ? "TERMINATE" : "MIGRATE"
+    preemptible         = var.use_preemptible_vms
+  }
+  
+  service_account {
+    email  = google_service_account.detonation_service_account.email
+    scopes = ["cloud-platform"]
+  }
+  
+  tags = ["detonation-vm", "windows-vm"]
   
   lifecycle {
     create_before_destroy = true
   }
 }
 
-resource "google_compute_instance_template" "windows_7_template" {
-  name        = "detonation-win7-template"
-  description = "Windows 7 VM template for malware detonation"
-  
-  machine_type = "e2-medium"
+# Linux VM Instance Template
+resource "google_compute_instance_template" "detonation_ubuntu_template" {
+  count        = var.enable_linux_detonation ? 1 : 0
+  name_prefix  = "detonation-ubuntu-"
+  machine_type = "n1-standard-2"
   
   disk {
-    source_image = "windows-cloud/windows-7-enterprise-x64" # Note: may need custom image
+    source_image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2004-lts"
     auto_delete  = true
     boot         = true
-    disk_type    = "pd-balanced"
-    disk_size_gb = 40
+    disk_size_gb = 50
+    disk_type    = "pd-ssd"
   }
   
   network_interface {
-    network    = google_compute_network.detonation_network.id
-    subnetwork = google_compute_subnetwork.detonation_subnet.id
-  }
-  
-  service_account {
-    email  = google_service_account.detonation_vm_sa.email
-    scopes = ["cloud-platform"]
+    network = "default"
+    access_config {} # Ephemeral IP
   }
   
   metadata = {
-    windows-startup-script-ps1 = file("${path.module}/scripts/windows_detonation_setup.ps1")
+    enable-guest-attributes = "TRUE"
+    startup-script = <<-EOT
+      #!/bin/bash
+      # Set up logging
+      exec > >(tee /var/log/detonation_startup.log) 2>&1
+      echo "Starting detonation environment setup at $(date)"
+      
+      # Install analysis tools
+      apt-get update
+      apt-get install -y tcpdump wireshark-common tshark clamav strace ltrace curl
+
+      # Install Google Cloud SDK if not already installed
+      if [ ! -d /usr/share/google-cloud-sdk ]; then
+        echo "Installing Google Cloud SDK"
+        curl https://sdk.cloud.google.com | bash -s -- --disable-prompts
+        echo "source /usr/share/google-cloud-sdk/path.bash.inc" >> /etc/profile.d/gcloud.sh
+        echo "source /usr/share/google-cloud-sdk/completion.bash.inc" >> /etc/profile.d/gcloud.sh
+      fi
+      
+      # Set up analysis environment
+      mkdir -p /opt/detonation
+      mkdir -p /opt/detonation/logs
+      mkdir -p /opt/detonation/results
+      
+      # Set up permissions
+      chmod 777 /opt/detonation -R
+      
+      echo "Detonation environment setup completed at $(date)"
+    EOT
   }
   
-  tags = ["detonation-vm", "windows-7"]
+  scheduling {
+    automatic_restart   = false
+    on_host_maintenance = var.use_preemptible_vms ? "TERMINATE" : "MIGRATE"
+    preemptible         = var.use_preemptible_vms
+  }
+  
+  service_account {
+    email  = google_service_account.detonation_service_account.email
+    scopes = ["cloud-platform"]
+  }
+  
+  tags = ["detonation-vm", "linux-vm"]
   
   lifecycle {
     create_before_destroy = true
   }
 }
 
-resource "google_compute_instance_template" "ubuntu_template" {
-  name        = "detonation-ubuntu-template"
-  description = "Ubuntu VM template for malware detonation"
-  
-  machine_type = "e2-medium"
-  
-  disk {
-    source_image = "ubuntu-os-cloud/ubuntu-2004-lts"
-    auto_delete  = true
-    boot         = true
-    disk_type    = "pd-balanced"
-    disk_size_gb = 30
-  }
-  
-  network_interface {
-    network    = google_compute_network.detonation_network.id
-    subnetwork = google_compute_subnetwork.detonation_subnet.id
-  }
-  
-  service_account {
-    email  = google_service_account.detonation_vm_sa.email
-    scopes = ["cloud-platform"]
-  }
-  
-  metadata = {
-    startup-script = file("${path.module}/scripts/linux_detonation_setup.sh")
-  }
-  
-  tags = ["detonation-vm", "ubuntu"]
-  
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-# Cloud Run service
-resource "google_cloud_run_service" "malware_platform" {
-  name     = "malware-detonation-platform"
+# Main Cloud Run service
+resource "google_cloud_run_service" "malware_detonation_platform" {
+  name     = var.app_name
   location = var.region
   
   template {
-    metadata {
-      annotations = {
-        "autoscaling.knative.dev/maxScale" = "10"
-        "autoscaling.knative.dev/minScale" = "1"
-      }
-    }
-    
     spec {
-      service_account_name = google_service_account.malware_platform_sa.email
-      
       containers {
-        image = "gcr.io/${var.project_id}/malware-detonation-platform:latest"
-        
-        resources {
-          limits = {
-            cpu    = "2"
-            memory = "2Gi"
-          }
-        }
+        image = "gcr.io/${var.project_id}/${var.app_name}:latest"
         
         env {
           name  = "DEBUG"
@@ -297,18 +316,23 @@ resource "google_cloud_run_service" "malware_platform" {
         }
         
         env {
+          name  = "DATABASE_PATH"
+          value = "/app/data/malware_platform.db"
+        }
+        
+        env {
+          name  = "UPLOAD_FOLDER"
+          value = "/app/data/uploads"
+        }
+        
+        env {
+          name  = "MAX_UPLOAD_SIZE_MB"
+          value = "100"
+        }
+        
+        env {
           name  = "GCP_PROJECT_ID"
           value = var.project_id
-        }
-        
-        env {
-          name  = "GCP_STORAGE_BUCKET"
-          value = google_storage_bucket.malware_samples.name
-        }
-        
-        env {
-          name  = "GCP_RESULTS_BUCKET"
-          value = google_storage_bucket.detonation_results.name
         }
         
         env {
@@ -322,42 +346,40 @@ resource "google_cloud_run_service" "malware_platform" {
         }
         
         env {
-          name  = "VM_NETWORK"
-          value = google_compute_network.detonation_network.name
+          name  = "ON_CLOUD_RUN"
+          value = "true"
         }
         
         env {
-          name  = "VM_SUBNET"
-          value = google_compute_subnetwork.detonation_subnet.name
+          name  = "GCP_RESULTS_BUCKET"
+          value = google_storage_bucket.detonation_results.name
         }
         
         env {
-          name  = "SECRET_KEY"
-          value_from {
-            secret_key_ref {
-              name = google_secret_manager_secret.secret_key.secret_id
-              key  = "latest"
-            }
+          name  = "MAX_CONCURRENT_DETONATIONS"
+          value = var.max_concurrent_detonations
+        }
+        
+        env {
+          name  = "DETONATION_TIMEOUT_MINUTES"
+          value = var.detonation_timeout_minutes
+        }
+        
+        env {
+          name  = "USE_PREEMPTIBLE_VMS"
+          value = var.use_preemptible_vms ? "true" : "false"
+        }
+        
+        env {
+          name  = "GENERATE_TEMPLATES"
+          value = "true"
+        }
+        
+        resources {
+          limits = {
+            cpu    = "1000m"
+            memory = "512Mi"
           }
-        }
-        
-        env {
-          name  = "DATABASE_PATH"
-          value = "/app/data/malware_platform.db"
-        }
-        
-        env {
-          name  = "MAX_UPLOAD_SIZE_MB"
-          value = "100"
-        }
-        
-        env {
-          name  = "APP_NAME"
-          value = "Malware Detonation Platform"
-        }
-        
-        ports {
-          container_port = 8080
         }
       }
     }
@@ -368,28 +390,38 @@ resource "google_cloud_run_service" "malware_platform" {
     latest_revision = true
   }
   
-  depends_on = [
-    google_project_iam_member.malware_platform_sa_bindings
-  ]
+  autogenerate_revision_name = true
 }
 
-# Allow unauthenticated invocations
+# IAM policy to make the service public
 resource "google_cloud_run_service_iam_member" "public_access" {
-  service  = google_cloud_run_service.malware_platform.name
-  location = google_cloud_run_service.malware_platform.location
+  service  = google_cloud_run_service.malware_detonation_platform.name
+  location = google_cloud_run_service.malware_detonation_platform.location
   role     = "roles/run.invoker"
   member   = "allUsers"
 }
 
 # Outputs
-output "cloud_run_url" {
-  value = google_cloud_run_service.malware_platform.status[0].url
-}
-
 output "malware_samples_bucket" {
   value = google_storage_bucket.malware_samples.name
 }
 
 output "detonation_results_bucket" {
   value = google_storage_bucket.detonation_results.name
+}
+
+output "pubsub_topic" {
+  value = google_pubsub_topic.detonation_notifications.name
+}
+
+output "service_url" {
+  value = google_cloud_run_service.malware_detonation_platform.status[0].url
+}
+
+output "windows_template" {
+  value = var.enable_windows_detonation ? google_compute_instance_template.detonation_win10_template[0].self_link : "Windows detonation disabled"
+}
+
+output "linux_template" {
+  value = var.enable_linux_detonation ? google_compute_instance_template.detonation_ubuntu_template[0].self_link : "Linux detonation disabled"
 }
