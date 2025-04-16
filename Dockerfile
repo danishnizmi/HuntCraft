@@ -4,7 +4,8 @@ FROM python:3.11-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    PORT=8080
 
 # Set working directory
 WORKDIR /app
@@ -23,62 +24,56 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a clean requirements file without problematic packages
-RUN echo "# Core framework\n\
-Flask==2.3.3\n\
-Werkzeug==2.3.7\n\
-Jinja2==3.1.2\n\
-gunicorn==21.2.0\n\
-Flask-Login==0.6.2\n\
-\n\
-# Database\n\
-SQLAlchemy==2.0.20\n\
-psycopg2-binary==2.9.7\n\
-\n\
-# GCP libraries\n\
-google-cloud-storage==2.10.0\n\
-google-cloud-compute==1.12.0\n\
-google-cloud-logging==3.5.0\n\
-google-cloud-monitoring==2.15.0\n\
-google-cloud-secret-manager==2.16.2\n\
-google-cloud-pubsub==2.18.4\n\
-google-auth==2.22.0\n\
-google-cloud-functions==1.13.1\n\
-\n\
-# Data processing\n\
-pandas==2.0.3\n\
-numpy==1.24.4\n\
-\n\
-# Security and file analysis\n\
-python-magic==0.4.27\n\
-\n\
-# Visualization\n\
-plotly==5.15.0\n\
-\n\
-# Utilities\n\
-requests==2.31.0\n\
-urllib3==2.0.4\n\
-six==1.16.0\n\
-python-dateutil==2.8.2\n\
-pytz==2023.3" > /app/requirements-clean.txt
-
-# Install Python dependencies from the clean requirements file
+# Install Python dependencies (without using requirements.txt)
+# Core framework
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r /app/requirements-clean.txt
+    pip install --no-cache-dir \
+    Flask==2.3.3 \
+    Werkzeug==2.3.7 \
+    Jinja2==3.1.2 \
+    gunicorn==21.2.0 \
+    Flask-Login==0.6.2 \
+    # Database
+    SQLAlchemy==2.0.20 \
+    psycopg2-binary==2.9.7 \
+    # GCP libraries
+    google-cloud-storage==2.10.0 \
+    google-cloud-compute==1.12.0 \
+    google-cloud-logging==3.5.0 \
+    google-cloud-monitoring==2.15.0 \
+    google-cloud-secret-manager==2.16.2 \
+    google-cloud-pubsub==2.18.4 \
+    google-auth==2.22.0 \
+    google-cloud-functions==1.13.1 \
+    # Data processing
+    pandas==2.0.3 \
+    numpy==1.24.4 \
+    # Security and file analysis
+    python-magic==0.4.27 \
+    # Visualization
+    plotly==5.15.0 \
+    # Utilities
+    requests==2.31.0 \
+    urllib3==2.0.4 \
+    six==1.16.0 \
+    python-dateutil==2.8.2 \
+    pytz==2023.3
 
 # Copy application code
 COPY . .
 
-# Create a stub module to handle imports that would otherwise fail
+# Create stub modules for problematic packages
 RUN mkdir -p /app/stubs && \
-    echo "# Stub for ssdeep\nclass Hash:\n    def __init__(self, *args, **kwargs):\n        pass\n    def update(self, *args, **kwargs):\n        pass\n    def digest(self, *args, **kwargs):\n        return 'stub_hash_value'\ndef hash(*args, **kwargs):\n    return Hash()\ndef compare(*args, **kwargs):\n    return 0" > /app/stubs/ssdeep.py && \
-    echo "# Stub for yara\ndef compile(*args, **kwargs):\n    class Rules:\n        def match(self, *args, **kwargs):\n            return []\n    return Rules()" > /app/stubs/yara.py && \
-    echo "# Stub for pefile\nclass PE:\n    def __init__(self, *args, **kwargs):\n        self.DIRECTORY_ENTRY_IMPORT = []\n        self.DIRECTORY_ENTRY_EXPORT = []\n    def close(self):\n        pass" > /app/stubs/pefile.py && \
-    echo "# Add stubs directory to Python path\nimport sys\nsys.path.insert(0, '/app/stubs')" > /app/stubs/__init__.py
+    echo 'class Hash:\n    def __init__(self, *args, **kwargs):\n        self.value = "stub"\n    def update(self, *args, **kwargs):\n        pass\n    def digest(self):\n        return "stub_hash"\n\ndef hash(*args, **kwargs):\n    return Hash()\n\ndef compare(*args, **kwargs):\n    return 0' > /app/stubs/ssdeep.py && \
+    echo 'class Rules:\n    def match(self, *args, **kwargs):\n        return []\n\ndef compile(*args, **kwargs):\n    return Rules()' > /app/stubs/yara.py && \
+    echo 'class Entry:\n    def __init__(self, *args, **kwargs):\n        self.dll = "stub.dll"\n        self.imports = []\n\nclass PE:\n    def __init__(self, *args, **kwargs):\n        self.DIRECTORY_ENTRY_IMPORT = [Entry()]\n        self.DIRECTORY_ENTRY_EXPORT = []\n    def close(self):\n        pass' > /app/stubs/pefile.py && \
+    touch /app/stubs/__init__.py
 
-# Modify main.py to patch imports
-RUN echo "import sys, os\nsys.path.insert(0, '/app/stubs')\n$(cat main.py)" > main.py.new && \
-    mv main.py.new main.py
+# Create a Python startup script to modify imports
+RUN echo 'import sys\nsys.path.insert(0, "/app/stubs")\n' > /app/sitecustomize.py
+
+# Set PYTHONPATH to include stubs
+ENV PYTHONPATH=/app:/app/stubs:$PYTHONPATH
 
 # Create necessary directories
 RUN mkdir -p /app/data/uploads && \
@@ -92,30 +87,44 @@ RUN mkdir -p /app/data/uploads && \
 ENV DATABASE_PATH=/app/data/malware_platform.db \
     UPLOAD_FOLDER=/app/data/uploads \
     MAX_UPLOAD_SIZE_MB=100 \
-    PORT=8080 \
     DEBUG=true
 
-# Create a startup script that handles initialization
+# Create a startup wrapper script
 RUN echo '#!/bin/bash\n\
 echo "Starting application initialization..."\n\
-# Create necessary directories\n\
+echo "Python version:"\n\
+python --version\n\
+echo "Installed packages:"\n\
+pip list\n\
+echo "Working directory: $(pwd)"\n\
+echo "Files in current directory:"\n\
+ls -la\n\
+\n\
+# Create and verify directories\n\
 mkdir -p /app/data/uploads\n\
 mkdir -p /app/static/css\n\
 mkdir -p /app/static/js\n\
 mkdir -p /app/templates\n\
+echo "Directory structure:"\n\
+find /app -type d | sort\n\
 \n\
-# Set proper permissions\n\
-chmod -R 755 /app/data\n\
+# Test imports\n\
+echo "Testing key imports..."\n\
+python -c "import os; print(f\\"Python path: {os.environ.get(\\"PYTHONPATH\\")}\\")" || echo "PYTHONPATH test failed"\n\
+python -c "import sys; print(f\\"Python sys.path: {sys.path}\\")" || echo "sys.path test failed"\n\
+python -c "import flask; print(f\\"Flask version: {flask.__version__}\\")" || echo "Flask import failed"\n\
+python -c "import stubs.ssdeep as ssdeep; h = ssdeep.hash(); print(f\\"ssdeep stub imported: {h.digest()}\\")" || echo "ssdeep stub import failed"\n\
 \n\
-# Run the application\n\
 echo "Starting Gunicorn server..."\n\
 exec gunicorn --bind 0.0.0.0:$PORT \
-    --workers=2 \
-    --threads=8 \
+    --workers=1 \
+    --threads=4 \
     --timeout=120 \
     --access-logfile=- \
     --error-logfile=- \
     --log-level=debug \
+    --preload \
+    --reload \
     "main:create_app()"' > /app/start.sh && \
     chmod +x /app/start.sh
 
