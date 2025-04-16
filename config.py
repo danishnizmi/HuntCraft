@@ -58,10 +58,13 @@ class Config:
     ENABLE_DATA_EXPORT = os.environ.get('ENABLE_DATA_EXPORT', 'True').lower() in ('true', '1', 't')
     ENABLE_VISUALIZATION = os.environ.get('ENABLE_VISUALIZATION', 'True').lower() in ('true', '1', 't')
     
-    # Secret Manager function (kept for backward compatibility but not used for SECRET_KEY)
+    # Secret Manager function - FIXED to handle missing secret_id
     @classmethod
-    def get_secret(cls, secret_id, version="latest"):
+    def get_secret(cls, secret_id=None, version="latest"):
         """Get secret from Secret Manager or environment fallback"""
+        if not secret_id:
+            return None  # Return None if no secret_id provided
+            
         if cls.ON_CLOUD_RUN and cls.PROJECT_ID:
             try:
                 client = secretmanager.SecretManagerServiceClient()
