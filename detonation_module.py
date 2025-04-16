@@ -86,14 +86,14 @@ def setup_pubsub_subscription():
             subscriber.get_subscription(request={"subscription": subscription_path})
             logger.info(f"Pub/Sub subscription already exists: {subscription_path}")
         except Exception:
-            # Subscription doesn't exist, try to create it
+            # Create subscription if it doesn't exist
             logger.info(f"Creating new Pub/Sub subscription: {subscription_path}")
             topic_path = f"projects/{project_id}/topics/detonation-notifications"
             subscriber.create_subscription(
                 request={"name": subscription_path, "topic": topic_path}
             )
         
-        # Set up message handler and start subscriber in a separate thread
+        # Start subscriber in a separate thread
         def callback(message):
             try:
                 data = json.loads(message.data.decode('utf-8'))
@@ -106,17 +106,10 @@ def setup_pubsub_subscription():
                 logger.error(f"Error handling Pub/Sub message: {e}")
                 message.nack()
         
-        def run_subscriber():
-            try:
-                streaming_pull_future = subscriber.subscribe(subscription_path, callback)
-                logger.info(f"Pub/Sub subscription active: {subscription_path}")
-                streaming_pull_future.result()
-            except Exception as e:
-                logger.error(f"Pub/Sub subscription error: {e}")
-                
-        thread = threading.Thread(target=run_subscriber)
-        thread.daemon = True
-        thread.start()
+        threading.Thread(
+            target=lambda: subscriber.subscribe(subscription_path, callback).result(),
+            daemon=True
+        ).start()
         
     except Exception as e:
         logger.error(f"Error setting up Pub/Sub subscription: {e}")
@@ -232,10 +225,8 @@ def create_detonation_job(sample_id, vm_type):
     finally:
         conn.close()
     
-    # Track active job
+    # Track active job and update status
     active_jobs[job_id] = {'job_uuid': job_uuid, 'status': 'queued'}
-    
-    # Update job to 'deploying' status
     update_job_status(job_id, 'deploying')
     
     # Start VM deployment using instance template
@@ -252,7 +243,7 @@ def create_detonation_job(sample_id, vm_type):
     return job_id
 
 def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
-    """Deploy a GCP VM for malware detonation using instance templates"""
+    """Deploy a GCP VM for malware detonation with improved reliability"""
     project_id = current_app.config['GCP_PROJECT_ID']
     zone = current_app.config['GCP_ZONE']
     
@@ -275,10 +266,10 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
     
     template_url = instance_templates.get(vm_type, instance_templates['windows-10-x64'])
     
-    # Create the VM from template
+    # Create the VM with improved metadata and reliability
     instance_client = compute_v1.InstancesClient()
     
-    # Create instance from template request
+    # Create instance with enhanced metadata
     instance_props = {
         "name": vm_name,
         "metadata": {
@@ -289,42 +280,94 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
                 {"key": "results-bucket", "value": current_app.config['GCP_RESULTS_BUCKET']},
                 {"key": "job-id", "value": str(job_id)},
                 {"key": "detonation-timeout", "value": str(current_app.config.get('DETONATION_TIMEOUT_MINUTES', 30))},
-                {"key": "project-id", "value": project_id}
+                {"key": "project-id", "value": project_id},
+                {"key": "shutdown-script", "value": create_shutdown_script()},
+                {"key": "health-check-interval", "value": "60"},  # Check health every 60 seconds
             ]
         },
         "labels": {
             "purpose": "malware-detonation",
             "job-id": str(job_id),
-            "vm-type": vm_type.replace('-', '_')
+            "vm-type": vm_type.replace('-', '_'),
+            "created-by": "huntcraft",
+            "auto-delete": "true"
+        },
+        "scheduling": {
+            "automaticRestart": False,  # Don't restart if crashes
+            "preemptible": current_app.config.get('USE_PREEMPTIBLE_VMS', False)
         }
     }
     
-    # Create and start the VM
-    operation = instance_client.insert_with_template(
-        project=project_id,
-        zone=zone,
-        instance_resource=instance_props,
-        source_instance_template=template_url
-    )
+    # Create and start the VM with retry logic
+    retry_attempts = 3
+    for attempt in range(retry_attempts):
+        try:
+            logger.info(f"Deploying VM {vm_name} (attempt {attempt+1}/{retry_attempts})")
+            operation = instance_client.insert_with_template(
+                project=project_id,
+                zone=zone,
+                instance_resource=instance_props,
+                source_instance_template=template_url
+            )
+            
+            # Check for immediate errors
+            if operation.error:
+                error_messages = [error.message for error in operation.error.errors]
+                raise Exception(f"VM creation failed: {', '.join(error_messages)}")
+            
+            # Set up job monitoring, update status, and schedule cleanup
+            setup_job_monitoring(job_id, vm_name)
+            update_job_status(job_id, 'running', started_at=str(time.time()))
+            schedule_cleanup(job_id, vm_name, 
+                            timeout_minutes=current_app.config.get('DETONATION_TIMEOUT_MINUTES', 60))
+            
+            logger.info(f"Detonation VM {vm_name} deployed for job {job_id}")
+            return
+        except Exception as e:
+            logger.error(f"VM deployment error (attempt {attempt+1}): {str(e)}")
+            if attempt == retry_attempts - 1:
+                raise
+            time.sleep(5)
+
+def create_shutdown_script():
+    """Create a shutdown script for graceful VM termination"""
+    return """#!/bin/bash
+# Set up logging
+exec > >(tee /var/log/detonation_shutdown.log) 2>&1
+echo "Running shutdown cleanup at $(date)"
+
+# Get metadata
+PROJECT_ID=$(curl -s "http://metadata.google.internal/computeMetadata/v1/project/project-id" -H "Metadata-Flavor: Google")
+JOB_UUID=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/attributes/job-uuid" -H "Metadata-Flavor: Google")
+JOB_ID=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/attributes/job-id" -H "Metadata-Flavor: Google")
+RESULTS_BUCKET=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/attributes/results-bucket" -H "Metadata-Flavor: Google")
+
+# Check if we already uploaded results
+if ! gsutil -q stat gs://$RESULTS_BUCKET/jobs/$JOB_UUID/summary.json; then
+    echo "No results found, sending failure notification"
     
-    # Check for immediate errors
-    if operation.error:
-        error_messages = [error.message for error in operation.error.errors]
-        raise Exception(f"VM creation failed: {', '.join(error_messages)}")
+    # Create minimal summary
+    echo "{\\\"status\\\": \\\"failed\\\", \\\"error\\\": \\\"VM shutdown without completing analysis\\\"}" > /tmp/summary.json
     
-    # Set up job monitoring and update job status to running
-    setup_job_monitoring(job_id, vm_name)
-    update_job_status(job_id, 'running', started_at=str(time.time()))
-    logger.info(f"Detonation VM {vm_name} deployed for job {job_id}")
+    # Upload minimal summary
+    gsutil cp /tmp/summary.json gs://$RESULTS_BUCKET/jobs/$JOB_UUID/summary.json
+    
+    # Send failure notification
+    gcloud pubsub topics publish detonation-notifications --project=$PROJECT_ID --message="{\\\"action\\\":\\\"job_update\\\",\\\"job_id\\\":$JOB_ID,\\\"status\\\":\\\"failed\\\",\\\"error_message\\\":\\\"VM shutdown without completing analysis\\\",\\\"results_path\\\":\\\"jobs/$JOB_UUID/\\\"}"
+fi
+
+echo "Shutdown cleanup complete at $(date)"
+"""
 
 def setup_job_monitoring(job_id, vm_name):
     """Configure monitoring for the detonation job using Pub/Sub"""
     project_id = current_app.config['GCP_PROJECT_ID']
     
-    # Create a Pub/Sub publisher and publish monitoring message
+    # Create a Pub/Sub publisher
     publisher = pubsub_v1.PublisherClient()
     topic_path = publisher.topic_path(project_id, 'detonation-notifications')
     
+    # Publish a monitoring setup message
     message_data = json.dumps({
         'action': 'monitor',
         'job_id': job_id,
@@ -334,6 +377,43 @@ def setup_job_monitoring(job_id, vm_name):
     
     publisher.publish(topic_path, data=message_data)
     logger.info(f"Set up monitoring for job {job_id}")
+
+def schedule_cleanup(job_id, vm_name, timeout_minutes=60):
+    """Schedule automatic cleanup of a VM after timeout period"""
+    def cleanup_task():
+        time.sleep(timeout_minutes * 60)
+        
+        # Check if job still exists and is running
+        job = get_job_by_id(job_id)
+        if job and job['status'] == 'running':
+            logger.warning(f"Job {job_id} (VM {vm_name}) timed out after {timeout_minutes} minutes")
+            
+            try:
+                # Force VM deletion
+                project_id = current_app.config['GCP_PROJECT_ID']
+                zone = current_app.config['GCP_ZONE']
+                
+                instance_client = compute_v1.InstancesClient()
+                instance_client.delete(
+                    project=project_id,
+                    zone=zone,
+                    instance=vm_name
+                )
+                
+                # Update job status to timed out
+                update_job_status(job_id, 'failed', 
+                                 error_message=f"Detonation timed out after {timeout_minutes} minutes",
+                                 completed_at=str(time.time()))
+                
+                logger.info(f"Cleaned up timed out VM {vm_name} for job {job_id}")
+            except Exception as e:
+                logger.error(f"Error cleaning up timed out VM {vm_name}: {str(e)}")
+    
+    # Start cleanup task in separate thread
+    cleanup_thread = threading.Thread(target=cleanup_task)
+    cleanup_thread.daemon = True
+    cleanup_thread.start()
+    logger.info(f"Scheduled cleanup for job {job_id} (VM {vm_name}) after {timeout_minutes} minutes")
 
 def update_job_status(job_id, status, started_at=None, completed_at=None, error_message=None):
     """Update the status of a detonation job"""
@@ -430,6 +510,7 @@ def handle_job_update(message):
         # Add job_id to update values
         update_values.append(job_id)
         
+        # Execute the query
         query = f"UPDATE detonation_jobs SET {', '.join(update_fields)} WHERE id = ?"
         cursor.execute(query, update_values)
         conn.commit()
@@ -442,18 +523,27 @@ def handle_job_update(message):
         logger.error(f"Error handling job update: {e}")
 
 def process_detonation_results(job_id, results_path):
-    """Process and store detonation results"""
+    """Process and store detonation results with enhanced error handling"""
     try:
         # Get the results from GCS
         storage_client = storage.Client()
         bucket = storage_client.bucket(current_app.config['GCP_RESULTS_BUCKET'])
         
         # Fetch summary.json from the results
-        summary_blob_name = f"jobs/{get_job_uuid(job_id)}/summary.json"
+        summary_blob_name = f"{results_path}summary.json"
         summary_blob = bucket.blob(summary_blob_name)
         
         if summary_blob.exists():
             summary_data = json.loads(summary_blob.download_as_string())
+            
+            # Enhance summary with additional metadata
+            summary_data['processed_at'] = datetime.now().isoformat()
+            summary_data['job_id'] = job_id
+            
+            # Extract key artifacts
+            artifacts = extract_artifacts_from_results(bucket, results_path)
+            if artifacts:
+                summary_data['artifacts'] = artifacts
             
             # Store summary in database
             conn = _db_connection()
@@ -470,12 +560,67 @@ def process_detonation_results(job_id, results_path):
                 (job_id, 'archive', json.dumps({'path': results_path}))
             )
             
+            # Store specialized result types if available
+            for result_type in ['network_activity', 'file_changes', 'registry_changes', 'process_tree']:
+                if result_type in summary_data:
+                    cursor.execute(
+                        "INSERT INTO detonation_results (job_id, result_type, result_data, created_at) VALUES (?, ?, ?, datetime('now'))",
+                        (job_id, result_type.split('_')[0], json.dumps(summary_data[result_type]))
+                    )
+            
             conn.commit()
             conn.close()
             
             logger.info(f"Processed results for job {job_id}")
+            
+            # Generate visualization data if configured
+            if current_app.config.get('ENABLE_VISUALIZATION', True):
+                try:
+                    from viz_module import create_visualization_from_data
+                    create_visualization_from_data(job_id, summary_data)
+                except Exception as viz_error:
+                    logger.error(f"Visualization generation error: {viz_error}")
+        else:
+            logger.error(f"No summary.json found for job {job_id} at {summary_blob_name}")
+            # Create a minimal error summary
+            record_error_result(job_id, "No summary.json found in results")
     except Exception as e:
         logger.error(f"Error processing results for job {job_id}: {e}")
+        record_error_result(job_id, str(e))
+
+def record_error_result(job_id, error_message):
+    """Record an error in the results table"""
+    try:
+        conn = _db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO detonation_results (job_id, result_type, result_data, created_at) VALUES (?, ?, ?, datetime('now'))",
+            (job_id, 'error', json.dumps({"error": error_message}))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error recording result error: {e}")
+
+def extract_artifacts_from_results(bucket, results_path):
+    """Extract important artifacts from detonation results"""
+    artifacts = {}
+    
+    # Check for common artifact files
+    artifact_files = [
+        "screenshot.png", 
+        "memory_dump.bin",
+        "network_capture.pcap",
+        "processes.json",
+        "registry_changes.json"
+    ]
+    
+    for file in artifact_files:
+        blob = bucket.blob(f"{results_path}{file}")
+        if blob.exists():
+            artifacts[file] = f"{results_path}{file}"
+    
+    return artifacts
 
 def cancel_detonation_job(job_id):
     """Cancel a running detonation job"""
@@ -493,16 +638,12 @@ def cancel_detonation_job(job_id):
             instance_client = compute_v1.InstancesClient()
             
             # Delete the VM
-            operation = instance_client.delete(
+            instance_client.delete(
                 project=project_id,
                 zone=zone,
                 instance=job['vm_name']
             )
             
-            # Check for immediate errors
-            if operation.error:
-                error_messages = [error.message for error in operation.error.errors]
-                logger.error(f"Error deleting VM: {', '.join(error_messages)}")
         except Exception as e:
             logger.error(f"Error deleting VM for job {job_id}: {e}")
     
@@ -720,7 +861,7 @@ def generate_templates():
     </div>
 </div>
 {% endblock %}""",
-
+        
         'detonation_view.html': """{% extends 'base.html' %}
 {% block title %}Detonation Job #{{ job.id }}{% endblock %}
 {% block content %}
@@ -831,26 +972,78 @@ def generate_templates():
                         <h6>Summary</h6>
                         <table class="table table-sm">
                             {% for key, value in result.result_data.items() %}
-                            <tr>
-                                <th>{{ key|title }}</th>
-                                <td>
-                                    {% if value is string %}
-                                        {{ value }}
-                                    {% elif value is mapping %}
-                                        <pre>{{ value }}</pre>
-                                    {% elif value is iterable and value is not string %}
-                                        <ul class="mb-0">
-                                            {% for item in value %}
-                                            <li>{{ item }}</li>
-                                            {% endfor %}
-                                        </ul>
-                                    {% else %}
-                                        {{ value }}
-                                    {% endif %}
-                                </td>
-                            </tr>
+                                {% if key != 'artifacts' and key != 'file_changes' and key != 'network_activity' and key != 'registry_changes' and key != 'process_tree' %}
+                                <tr>
+                                    <th>{{ key|title }}</th>
+                                    <td>
+                                        {% if value is string %}
+                                            {{ value }}
+                                        {% elif value is mapping %}
+                                            <pre>{{ value }}</pre>
+                                        {% elif value is iterable and value is not string %}
+                                            <ul class="mb-0">
+                                                {% for item in value %}
+                                                <li>{{ item }}</li>
+                                                {% endfor %}
+                                            </ul>
+                                        {% else %}
+                                            {{ value }}
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endif %}
                             {% endfor %}
                         </table>
+                    {% endif %}
+                    
+                    {% if result.result_type == 'network' %}
+                        <h6 class="mt-4">Network Activity</h6>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Protocol</th>
+                                        <th>Destination</th>
+                                        <th>Port</th>
+                                        <th>Process</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for conn in result.result_data %}
+                                    <tr>
+                                        <td>{{ conn.protocol }}</td>
+                                        <td>{{ conn.destination }}</td>
+                                        <td>{{ conn.port }}</td>
+                                        <td>{{ conn.process_name }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    {% endif %}
+                    
+                    {% if result.result_type == 'file' %}
+                        <h6 class="mt-4">File System Changes</h6>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Path</th>
+                                        <th>Action</th>
+                                        <th>Process</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for file in result.result_data %}
+                                    <tr>
+                                        <td>{{ file.path }}</td>
+                                        <td>{{ file.action }}</td>
+                                        <td>{{ file.process_name }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
                     {% endif %}
                 {% endfor %}
                 
@@ -911,7 +1104,7 @@ def generate_templates():
     {% endif %}
 </script>
 {% endblock %}""",
-
+        
         'detonation_create.html': """{% extends 'base.html' %}
 {% block title %}Create Detonation Job{% endblock %}
 {% block content %}
@@ -1001,8 +1194,9 @@ def generate_templates():
 {% endblock %}"""
     }
     
-    # Create templates
+    # Create templates if they don't exist
     for filename, content in templates.items():
         if not os.path.exists(f'templates/{filename}'):
             with open(f'templates/{filename}', 'w') as f:
                 f.write(content)
+            logger.info(f"Created template: {filename}")
