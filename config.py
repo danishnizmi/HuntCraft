@@ -28,8 +28,8 @@ class Config:
                 pass
         return os.environ.get(secret_id, f"dev-value-for-{secret_id}")
     
-    # Secret values
-    SECRET_KEY = get_secret.__func__("SECRET_KEY")
+    # Secret values - Fixed to use direct environment variable
+    SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key")
     
     # Storage configuration
     if ON_CLOUD_RUN:
