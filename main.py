@@ -2,20 +2,21 @@ from flask import Flask, current_app
 import os
 import sqlite3
 import logging
-import importlib
-from pathlib import Path
 from google.cloud import logging as gcp_logging
 
-# Module configuration - Fixed to use existing module names
+# Global registry for lazy-loaded modules
+_loaded_modules = {}
+
+# Module configuration
 MODULES = {
-    'malware': 'malware_module',  # Handles malware samples
-    'detonation': 'detonation_module',  # Handles VM detonation
-    'viz': 'viz_module',  # Fixed to use the actual module name (viz_module instead of results_module)
-    'web': 'web_interface'  # Web interface
+    'malware': 'malware_module',
+    'detonation': 'detonation_module',
+    'viz': 'viz_module',
+    'web': 'web_interface'
 }
 
 def create_app(test_config=None):
-    """Application factory to create and configure the Flask app"""
+    """Application factory with optimized loading to reduce memory usage"""
     # Create and configure the app
     app = Flask(__name__, 
                 static_folder='static',
@@ -29,6 +30,10 @@ def create_app(test_config=None):
     try:
         import config
         app.config.from_object(config.Config if not test_config else test_config)
+        
+        # Configure templates to be pre-generated during build, not runtime
+        app.config['GENERATE_TEMPLATES'] = False
+        
         logger.info("Configuration loaded successfully")
     except Exception as e:
         logger.error(f"Error loading configuration: {str(e)}")
@@ -43,51 +48,38 @@ def create_app(test_config=None):
             GCP_PROJECT_ID=os.environ.get('GCP_PROJECT_ID', ''),
             GCP_REGION=os.environ.get('GCP_REGION', 'us-central1'),
             GCP_ZONE=os.environ.get('GCP_ZONE', 'us-central1-a'),
-            PRIMARY_COLOR='#4a6fa5',
-            SECONDARY_COLOR='#6c757d',
-            DANGER_COLOR='#dc3545',
-            SUCCESS_COLOR='#28a745',
-            WARNING_COLOR='#ffc107',
-            INFO_COLOR='#17a2b8',
-            DARK_COLOR='#343a40',
-            LIGHT_COLOR='#f8f9fa',
-            ENABLE_ADVANCED_ANALYSIS=True,
-            ENABLE_DATA_EXPORT=True,
-            ENABLE_VISUALIZATION=True
+            GENERATE_TEMPLATES=False
         )
     
-    # Setup required directories 
-    _setup_directories(app)
+    # Setup required directories - only essential ones at startup
+    _setup_essential_directories(app)
     
-    # Initialize database
+    # Initialize database schema - but don't load all data
     with app.app_context():
         try:
-            _init_database()
+            _init_database_schema()
         except Exception as e:
             logger.error(f"Database initialization error: {str(e)}")
     
-    # Load and register all modules
-    _load_modules(app)
+    # Initialize only critical modules immediately (like 'web')
+    # Other modules will be lazy-loaded when needed
+    _init_core_modules(app)
     
     # Register error handlers
     @app.errorhandler(404)
     def page_not_found(e):
-        try:
-            mod = importlib.import_module(MODULES['web'])
-            if hasattr(mod, 'handle_404'):
-                return mod.handle_404(), 404
-        except:
-            pass
+        # Lazy load web module only when needed
+        web_module = get_module('web')
+        if hasattr(web_module, 'handle_404'):
+            return web_module.handle_404(), 404
         return "Page not found", 404
 
     @app.errorhandler(500)
     def server_error(e):
-        try:
-            mod = importlib.import_module(MODULES['web'])
-            if hasattr(mod, 'handle_500'):
-                return mod.handle_500(), 500
-        except:
-            pass
+        # Lazy load web module only when needed
+        web_module = get_module('web')
+        if hasattr(web_module, 'handle_500'):
+            return web_module.handle_500(), 500
         return "Server error", 500
         
     # Add health check endpoint for Cloud Run
@@ -95,8 +87,24 @@ def create_app(test_config=None):
     def health_check():
         return {'status': 'healthy'}, 200
     
+    # Register Blueprint lazy-loading routes
+    _register_lazy_routes(app)
+    
     logger.info("Application setup complete")
     return app
+
+def get_module(module_name):
+    """Lazy-load a module only when needed"""
+    if module_name not in _loaded_modules:
+        import importlib
+        if module_name in MODULES:
+            try:
+                _loaded_modules[module_name] = importlib.import_module(MODULES[module_name])
+                logging.getLogger(__name__).info(f"Lazy-loaded module: {module_name}")
+            except ImportError as e:
+                logging.getLogger(__name__).error(f"Failed to import module {module_name}: {str(e)}")
+                return None
+    return _loaded_modules.get(module_name)
 
 def setup_logging(app):
     """Set up logging with GCP integration if available"""
@@ -123,115 +131,114 @@ def setup_logging(app):
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
 
-def _setup_directories(app):
-    """Set up all required application directories"""
-    directories = [
+def _setup_essential_directories(app):
+    """Set up only essential directories at startup"""
+    # Only create critical directories at startup
+    essential_dirs = [
         app.config.get('UPLOAD_FOLDER', '/app/data/uploads'),
-        'static/css',
-        'static/js',
+        'static',
         'templates',
         os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db'))
     ]
     
-    for directory in directories:
+    for directory in essential_dirs:
         os.makedirs(directory, exist_ok=True)
 
-def _load_modules(app):
-    """Dynamically load and initialize all modules"""
+def _init_core_modules(app):
+    """Initialize only critical modules (e.g., web interface)"""
     logger = logging.getLogger(__name__)
     
-    for module_name, module_path in MODULES.items():
-        try:
-            # Dynamically import the module
-            module = importlib.import_module(module_path)
-            
-            # Initialize the module
-            if hasattr(module, 'init_app'):
-                module.init_app(app)
-                logger.info(f"Initialized module: {module_name}")
-            else:
-                logger.warning(f"Module {module_name} has no init_app method")
-                
-        except ImportError as e:
-            logger.error(f"Failed to import module {module_name}: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error initializing module {module_name}: {str(e)}")
+    # Only initialize the web module at startup
+    web_module_name = 'web'
+    try:
+        web_module = get_module(web_module_name)
+        if hasattr(web_module, 'init_app'):
+            web_module.init_app(app)
+            logger.info(f"Initialized core module: {web_module_name}")
+    except Exception as e:
+        logger.error(f"Error initializing core module {web_module_name}: {str(e)}")
 
-def _init_database():
-    """Initialize the database with schema from all modules"""
+def _register_lazy_routes(app):
+    """Register routes that trigger lazy module loading"""
+    logger = logging.getLogger(__name__)
+    
+    # Register malware routes
+    @app.route('/malware', defaults={'path': ''})
+    @app.route('/malware/<path:path>')
+    def malware_routes(path):
+        malware_module = get_module('malware')
+        if not hasattr(malware_module, 'malware_bp'):
+            logger.error("Malware module not properly loaded")
+            return "Module error", 500
+            
+        # Register blueprint if not already registered
+        if not app.blueprints.get('malware'):
+            app.register_blueprint(malware_module.malware_bp)
+            
+        # Dispatch to the module
+        return app.dispatch_request()
+    
+    # Register detonation routes
+    @app.route('/detonation', defaults={'path': ''})
+    @app.route('/detonation/<path:path>')
+    def detonation_routes(path):
+        detonation_module = get_module('detonation')
+        if not hasattr(detonation_module, 'detonation_bp'):
+            logger.error("Detonation module not properly loaded")
+            return "Module error", 500
+            
+        # Register blueprint if not already registered
+        if not app.blueprints.get('detonation'):
+            app.register_blueprint(detonation_module.detonation_bp)
+            
+        # Dispatch to the module
+        return app.dispatch_request()
+    
+    # Register visualization routes
+    @app.route('/viz', defaults={'path': ''})
+    @app.route('/viz/<path:path>')
+    def viz_routes(path):
+        viz_module = get_module('viz')
+        if not hasattr(viz_module, 'viz_bp'):
+            logger.error("Visualization module not properly loaded")
+            return "Module error", 500
+            
+        # Register blueprint if not already registered
+        if not app.blueprints.get('viz'):
+            app.register_blueprint(viz_module.viz_bp)
+            
+        # Dispatch to the module
+        return app.dispatch_request()
+
+def _init_database_schema():
+    """Initialize the database schema only, without loading data"""
     db_path = current_app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')
     logger = logging.getLogger(__name__)
     
     # Ensure directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
+    # Use context manager for proper cleanup
     try:
-        # Create database connection
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Create minimal web interface schema first
+            web_module = get_module('web')
+            if hasattr(web_module, 'create_database_schema'):
+                web_module.create_database_schema(cursor)
+                logger.info("Created web interface database schema")
+            
+            # Commit changes to ensure core functionality works
+            conn.commit()
         
-        # Initialize schemas from all modules
-        for module_name, module_path in MODULES.items():
-            try:
-                module = importlib.import_module(module_path)
-                
-                if hasattr(module, 'create_database_schema'):
-                    module.create_database_schema(cursor)
-                    logger.info(f"Created database schema for {module_name}")
-                else:
-                    logger.info(f"Module {module_name} has no database schema")
-            except Exception as e:
-                logger.error(f"Error creating schema for {module_name}: {str(e)}")
-        
-        # Commit changes and close
-        conn.commit()
-        conn.close()
-        logger.info("Database initialization complete")
+        logger.info("Core database initialization complete")
         
     except Exception as e:
         logger.error(f"Database initialization failed: {str(e)}")
         raise
 
-def create_cli_commands(app):
-    """Register CLI commands for the application"""
-    @app.cli.command("init-db")
-    def init_db_command():
-        """Initialize the database."""
-        with app.app_context():
-            _init_database()
-        print("Initialized the database.")
-    
-    @app.cli.command("create-buckets")
-    def create_buckets_command():
-        """Create GCP storage buckets if they don't exist."""
-        from google.cloud import storage
-        
-        client = storage.Client()
-        
-        # Create malware samples bucket
-        samples_bucket_name = app.config.get('GCP_STORAGE_BUCKET')
-        try:
-            if not client.bucket(samples_bucket_name).exists():
-                bucket = client.create_bucket(samples_bucket_name)
-                print(f"Created bucket {bucket.name}")
-            else:
-                print(f"Bucket {samples_bucket_name} already exists")
-        except Exception as e:
-            print(f"Error creating samples bucket: {str(e)}")
-            
-        # Create results bucket
-        results_bucket_name = app.config.get('GCP_RESULTS_BUCKET')
-        try:
-            if not client.bucket(results_bucket_name).exists():
-                bucket = client.create_bucket(results_bucket_name)
-                print(f"Created bucket {bucket.name}")
-            else:
-                print(f"Bucket {results_bucket_name} already exists")
-        except Exception as e:
-            print(f"Error creating results bucket: {str(e)}")
-
 if __name__ == "__main__":
     app = create_app()
-    create_cli_commands(app)
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=app.config.get('DEBUG', False))
