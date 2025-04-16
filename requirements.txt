@@ -6,7 +6,7 @@ gunicorn==21.2.0
 
 # Database
 SQLAlchemy==2.0.20
-psycopg2-binary==2.9.7  # For potential PostgreSQL migration
+psycopg2-binary==2.9.7
 
 # GCP libraries
 google-cloud-storage==2.10.0
@@ -22,21 +22,12 @@ numpy==1.24.4
 
 # Security and file analysis
 python-magic==0.4.27
-pefile==2023.2.7
-yara-python==4.3.1
-ssdeep==3.4
-oletools==0.60.1
-hashlib==20081119  # For file hashing
+# Commented out packages that require compilation:
+# pefile==2023.2.7
+# yara-python==4.3.1
+# ssdeep==3.4
+# oletools==0.60.1
+# hashlib is part of the Python standard library, no need to specify it
+# hashlib==20081119
 
-# Visualization
-plotly==5.15.0
-networkx==3.1
-
-# Authentication and security
-Flask-Login==0.6.2
-bcrypt==4.0.1
-PyJWT==2.8.0
-
-# Utilities
-python-dotenv==1.0.0
-requests==2.31.0
+# The rest of your requirements...
