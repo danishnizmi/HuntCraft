@@ -62,26 +62,41 @@ ENV DATABASE_PATH=/app/data/malware_platform.db \
     DEBUG=false \
     GENERATE_TEMPLATES=true
 
+# Pre-generate all templates during build to prevent runtime issues
+RUN python -c "import os; \
+    os.environ['GENERATE_TEMPLATES'] = 'true'; \
+    from flask import Flask; \
+    app = Flask(__name__); \
+    with app.app_context(): \
+        import web_interface; \
+        web_interface.generate_base_templates(); \
+        import malware_module; \
+        if hasattr(malware_module, 'generate_templates'): \
+            malware_module.generate_templates(); \
+        if hasattr(malware_module, 'generate_css'): \
+            malware_module.generate_css(); \
+        if hasattr(malware_module, 'generate_js'): \
+            malware_module.generate_js(); \
+        import detonation_module; \
+        import viz_module; \
+        if hasattr(viz_module, 'generate_templates'): \
+            viz_module.generate_templates(); \
+        if hasattr(viz_module, 'generate_css'): \
+            viz_module.generate_css(); \
+        if hasattr(viz_module, 'generate_js'): \
+            viz_module.generate_js()"
+
 # Create a startup wrapper script
 RUN echo '#!/bin/bash\n\
 echo "Starting application initialization..."\n\
 echo "Python version: $(python --version)"\n\
 \n\
-# Create directories if they don\'t exist\n\
+# Create directories if they dont exist\n\
 mkdir -p /app/data/uploads\n\
 mkdir -p /app/data/database\n\
 mkdir -p /app/static/css\n\
 mkdir -p /app/static/js\n\
 mkdir -p /app/templates\n\
-\n\
-# Ensure templates are generated\n\
-python -c "import os; \
-    os.environ[\"GENERATE_TEMPLATES\"] = \"true\"; \
-    from flask import Flask; \
-    app = Flask(__name__); \
-    with app.app_context(): \
-        import web_interface; \
-        web_interface.generate_base_templates()"\n\
 \n\
 # Start the server with memory optimizations\n\
 echo "Starting Gunicorn server..."\n\
