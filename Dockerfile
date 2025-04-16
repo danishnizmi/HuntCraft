@@ -23,12 +23,48 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements.txt first for better layer caching
-COPY requirements.txt .
+# Create a clean requirements file without problematic packages
+RUN echo "# Core framework\n\
+Flask==2.3.3\n\
+Werkzeug==2.3.7\n\
+Jinja2==3.1.2\n\
+gunicorn==21.2.0\n\
+Flask-Login==0.6.2\n\
+\n\
+# Database\n\
+SQLAlchemy==2.0.20\n\
+psycopg2-binary==2.9.7\n\
+\n\
+# GCP libraries\n\
+google-cloud-storage==2.10.0\n\
+google-cloud-compute==1.12.0\n\
+google-cloud-logging==3.5.0\n\
+google-cloud-monitoring==2.15.0\n\
+google-cloud-secret-manager==2.16.2\n\
+google-cloud-pubsub==2.18.4\n\
+google-auth==2.22.0\n\
+google-cloud-functions==1.13.1\n\
+\n\
+# Data processing\n\
+pandas==2.0.3\n\
+numpy==1.24.4\n\
+\n\
+# Security and file analysis\n\
+python-magic==0.4.27\n\
+\n\
+# Visualization\n\
+plotly==5.15.0\n\
+\n\
+# Utilities\n\
+requests==2.31.0\n\
+urllib3==2.0.4\n\
+six==1.16.0\n\
+python-dateutil==2.8.2\n\
+pytz==2023.3" > /app/requirements-clean.txt
 
-# Install Python dependencies
+# Install Python dependencies from the clean requirements file
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r /app/requirements-clean.txt
 
 # Copy application code
 COPY . .
