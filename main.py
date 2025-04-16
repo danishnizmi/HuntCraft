@@ -76,7 +76,7 @@ def create_app(test_config=None):
                      os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db'))]:
         os.makedirs(directory, exist_ok=True)
     
-    # Initialize database
+    # Initialize database - this will now automatically check and create tables
     from database import init_app as init_db
     init_db(app)
     
@@ -98,7 +98,15 @@ def create_app(test_config=None):
     # Health check endpoint
     @app.route('/health')
     def health_check():
-        return {'status': 'healthy'}, 200
+        try:
+            # Test database connection
+            db = sqlite3.connect(app.config.get('DATABASE_PATH'))
+            db.cursor().execute('SELECT 1').fetchone()
+            db.close()
+            return {'status': 'healthy', 'database': 'connected'}, 200
+        except Exception as e:
+            logger.error(f"Health check failed: {str(e)}")
+            return {'status': 'unhealthy', 'error': str(e)}, 500
     
     # Simple error handlers
     @app.errorhandler(404)
@@ -107,6 +115,7 @@ def create_app(test_config=None):
 
     @app.errorhandler(500)
     def server_error(e):
+        logger.error(f"Server error: {str(e)}")
         return f"Server error: {str(e)}", 500
     
     return app
