@@ -14,22 +14,8 @@ class Config:
     GCP_REGION = os.environ.get('GCP_REGION', 'us-central1')
     GCP_ZONE = os.environ.get('GCP_ZONE', 'us-central1-a')
     
-    # Secret Manager integration
-    @classmethod
-    def get_secret(cls, secret_id, version="latest"):
-        """Get secret from Secret Manager or environment fallback"""
-        if cls.ON_CLOUD_RUN and cls.PROJECT_ID:
-            try:
-                client = secretmanager.SecretManagerServiceClient()
-                name = f"projects/{cls.PROJECT_ID}/secrets/{secret_id}/versions/{version}"
-                response = client.access_secret_version(request={"name": name})
-                return response.payload.data.decode("UTF-8")
-            except Exception:
-                pass
-        return os.environ.get(secret_id, f"dev-value-for-{secret_id}")
-    
     # Secret values - Fixed to use direct environment variable
-    SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key")
+    SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-12345")
     
     # Storage configuration
     if ON_CLOUD_RUN:
@@ -71,3 +57,17 @@ class Config:
     ENABLE_ADVANCED_ANALYSIS = os.environ.get('ENABLE_ADVANCED_ANALYSIS', 'True').lower() in ('true', '1', 't')
     ENABLE_DATA_EXPORT = os.environ.get('ENABLE_DATA_EXPORT', 'True').lower() in ('true', '1', 't')
     ENABLE_VISUALIZATION = os.environ.get('ENABLE_VISUALIZATION', 'True').lower() in ('true', '1', 't')
+    
+    # Secret Manager function (kept for backward compatibility but not used for SECRET_KEY)
+    @classmethod
+    def get_secret(cls, secret_id, version="latest"):
+        """Get secret from Secret Manager or environment fallback"""
+        if cls.ON_CLOUD_RUN and cls.PROJECT_ID:
+            try:
+                client = secretmanager.SecretManagerServiceClient()
+                name = f"projects/{cls.PROJECT_ID}/secrets/{secret_id}/versions/{version}"
+                response = client.access_secret_version(request={"name": name})
+                return response.payload.data.decode("UTF-8")
+            except Exception:
+                pass
+        return os.environ.get(secret_id, f"dev-value-for-{secret_id}")
