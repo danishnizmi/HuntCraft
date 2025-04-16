@@ -44,9 +44,6 @@ RUN grep -v "ssdeep\|yara-python\|pefile" requirements.txt > requirements-safe.t
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements-safe.txt
 
-# Copy application code
-COPY . .
-
 # Create necessary directories
 RUN mkdir -p /app/data/uploads && \
     mkdir -p /app/data/database && \
@@ -55,6 +52,9 @@ RUN mkdir -p /app/data/uploads && \
     mkdir -p /app/templates && \
     chmod -R 755 /app/data
 
+# Copy application code
+COPY . .
+
 # Set environment variables for runtime
 ENV DATABASE_PATH=/app/data/malware_platform.db \
     UPLOAD_FOLDER=/app/data/uploads \
@@ -62,36 +62,18 @@ ENV DATABASE_PATH=/app/data/malware_platform.db \
     DEBUG=false \
     GENERATE_TEMPLATES=true
 
-# Pre-generate all templates during build to prevent runtime issues
-RUN python -c "import os; \
-    os.environ['GENERATE_TEMPLATES'] = 'true'; \
-    from flask import Flask; \
-    app = Flask(__name__); \
-    with app.app_context(): \
-        import web_interface; \
-        web_interface.generate_base_templates(); \
-        import malware_module; \
-        if hasattr(malware_module, 'generate_templates'): \
-            malware_module.generate_templates(); \
-        if hasattr(malware_module, 'generate_css'): \
-            malware_module.generate_css(); \
-        if hasattr(malware_module, 'generate_js'): \
-            malware_module.generate_js(); \
-        import detonation_module; \
-        import viz_module; \
-        if hasattr(viz_module, 'generate_templates'): \
-            viz_module.generate_templates(); \
-        if hasattr(viz_module, 'generate_css'): \
-            viz_module.generate_css(); \
-        if hasattr(viz_module, 'generate_js'): \
-            viz_module.generate_js()"
+# Create template generation script
+RUN echo 'import os\nos.environ["GENERATE_TEMPLATES"] = "true"\nfrom flask import Flask\napp = Flask(__name__)\nwith app.app_context():\n    print("Generating base templates...")\n    import web_interface\n    web_interface.generate_base_templates()\n    print("Base templates generated")\n    try:\n        import malware_module\n        if hasattr(malware_module, "generate_templates"):\n            malware_module.generate_templates()\n            print("Malware templates generated")\n        if hasattr(malware_module, "generate_css"):\n            malware_module.generate_css()\n        if hasattr(malware_module, "generate_js"):\n            malware_module.generate_js()\n    except Exception as e:\n        print(f"Error generating malware templates: {e}")\n    try:\n        import viz_module\n        if hasattr(viz_module, "generate_templates"):\n            viz_module.generate_templates()\n            print("Viz templates generated")\n        if hasattr(viz_module, "generate_css"):\n            viz_module.generate_css()\n        if hasattr(viz_module, "generate_js"):\n            viz_module.generate_js()\n    except Exception as e:\n        print(f"Error generating viz templates: {e}")' > /app/generate_templates.py
+
+# Run the template generation script
+RUN python /app/generate_templates.py
 
 # Create a startup wrapper script
 RUN echo '#!/bin/bash\n\
 echo "Starting application initialization..."\n\
 echo "Python version: $(python --version)"\n\
 \n\
-# Create directories if they dont exist\n\
+# Ensure directories exist\n\
 mkdir -p /app/data/uploads\n\
 mkdir -p /app/data/database\n\
 mkdir -p /app/static/css\n\
