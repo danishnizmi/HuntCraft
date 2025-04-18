@@ -19,6 +19,7 @@ MODULES = {
 }
 
 # Module initialization order - ensures dependencies are loaded properly
+# IMPORTANT: web module must be first to properly handle the root route
 MODULE_INIT_ORDER = ['web', 'malware', 'detonation', 'viz']
 
 # Track module initialization status
@@ -554,52 +555,6 @@ def create_app(test_config=None):
         # Set MAX_CONTENT_LENGTH based on MAX_UPLOAD_SIZE_MB
         app.config['MAX_CONTENT_LENGTH'] = app.config['MAX_UPLOAD_SIZE_MB'] * 1024 * 1024
         
-        # Check web interface configuration
-        logger.info("Checking web interface configuration")
-        try:
-            # Just import and check if web_bp is defined correctly
-            from web_interface import web_bp
-            logger.info(f"Web blueprint configuration: url_prefix={web_bp.url_prefix}")
-        except Exception as e:
-            logger.warning(f"Could not check web blueprint configuration: {e}")
-        
-        # *** CRITICAL: REGISTER ROOT ROUTE FIRST AND DIRECTLY ON APP ***
-        @app.route('/')
-        def root():
-            """Primary root route handler."""
-            logger.info("Primary root handler called")
-            try:
-                return render_template('index.html')
-            except Exception as e:
-                logger.error(f"Error in primary root handler: {e}")
-                return f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Malware Detonation Platform</title>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
-                        h1 {{ color: #4a6fa5; }}
-                        .links {{ margin-top: 20px; }}
-                        .links a {{ display: inline-block; margin: 0 10px; color: #4a6fa5; text-decoration: none; }}
-                        .links a:hover {{ text-decoration: underline; }}
-                    </style>
-                </head>
-                <body>
-                    <h1>Malware Detonation Platform</h1>
-                    <p>Welcome to the Malware Detonation Platform.</p>
-                    <div class="links">
-                        <a href="/malware">Malware Analysis</a>
-                        <a href="/detonation">Detonation Service</a>
-                        <a href="/viz">Visualizations</a>
-                        <a href="/diagnostic">System Diagnostics</a>
-                    </div>
-                </body>
-                </html>
-                """
-        
-        logger.info("Direct root route registered as primary handler")
-        
         # Register error handlers
         app.register_error_handler(404, handle_not_found)
         logger.info("Registered 404 error handler")
@@ -654,30 +609,14 @@ def create_app(test_config=None):
             logger.error(f"Database initialization error: {e}")
             logger.warning("Application will start but database functionality may be limited")
         
-        # CRITICAL CHANGE: Initialize modules in a different order, with web blueprint first
+        # CRITICAL CHANGE: Initialize modules in the defined order, with web module first
+        # This ensures the web blueprint handles the root route properly
         with app.app_context():
-            # First register web blueprint directly for root route handling
-            try:
-                from web_interface import web_bp
-                # CRITICAL: Register with empty URL prefix and ensure it takes precedence
-                web_bp.url_prefix = None  # Explicitly set to None, not empty string
-                app.register_blueprint(web_bp, url_prefix=None)  # Use None to avoid any Flask string concatenation issues
-                logger.info("Direct web blueprint registration successful")
-                module_status['web']['initialized'] = True
-            except Exception as e:
-                logger.error(f"Error directly registering web blueprint: {e}")
-                logger.warning("Web interface may not function properly - root route and UI features might be unavailable")
-                module_status['web']['error'] = str(e)
-            
-            # Now initialize other modules in the defined order
             for module_name in MODULE_INIT_ORDER:
-                # Skip web as we already initialized it
-                if module_name == 'web':
-                    continue
-                    
                 try:
                     module = get_module(module_name)
                     if module and hasattr(module, 'init_app'):
+                        logger.info(f"Initializing module: {module_name}")
                         module.init_app(app)
                         module_status[module_name]['initialized'] = True
                         logger.info(f"Successfully initialized module: {module_name}")
@@ -694,7 +633,7 @@ def create_app(test_config=None):
         @app.route('/start')
         def redirect_to_root():
             logger.info("Redirecting alternate root URLs to /")
-            return redirect(url_for('root'))
+            return redirect(url_for('web.index'))
         
         # Mark application as ready
         try:
