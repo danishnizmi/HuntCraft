@@ -1,0 +1,166 @@
+{% extends 'base.html' %}
+
+{% block title %}Dashboard - {{ app_name }}{% endblock %}
+
+{% block head %}
+<style>
+    .dashboard-card {
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        height: 100%;
+    }
+    .dashboard-card h5 {
+        color: #4a6fa5;
+        border-bottom: 1px solid #eaeaea;
+        padding-bottom: 10px;
+        margin-bottom: 15px;
+    }
+    .dashboard-stat {
+        font-size: 2rem;
+        font-weight: bold;
+        color: #4a6fa5;
+        margin-bottom: 5px;
+    }
+    .dashboard-label {
+        color: #666;
+        font-size: 0.9rem;
+    }
+    .status-indicator {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 5px;
+    }
+    .status-active { background-color: #28a745; }
+    .status-inactive { background-color: #dc3545; }
+    .status-warning { background-color: #ffc107; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>Dashboard</h1>
+    <div class="btn-group">
+        <a href="{{ url_for('malware.upload') }}" class="btn btn-primary">
+            <i class="fas fa-upload"></i> Upload Sample
+        </a>
+        <a href="{{ url_for('viz.create') }}" class="btn btn-outline-primary">
+            <i class="fas fa-chart-line"></i> Create Visualization
+        </a>
+    </div>
+</div>
+
+<!-- System Status -->
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="dashboard-card">
+            <h5>System Status</h5>
+            <div class="d-flex justify-content-between">
+                <div>
+                    <span class="status-indicator status-active"></span> Database: Connected
+                </div>
+                <div>
+                    <span class="status-indicator status-active"></span> Storage: Available
+                </div>
+                <div>
+                    <span class="status-indicator status-active"></span> VM Pool: Ready
+                </div>
+                <div>
+                    <span class="status-indicator status-active"></span> Analysis Engine: Running
+                </div>
+                <div>
+                    <span class="status-indicator status-active"></span> API: Available
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Stats Overview -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="dashboard-card text-center">
+            <div class="dashboard-stat">{{ datasets|length }}</div>
+            <div class="dashboard-label">Malware Samples</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="dashboard-card text-center">
+            <div class="dashboard-stat">{{ analyses|length }}</div>
+            <div class="dashboard-label">Detonation Jobs</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="dashboard-card text-center">
+            <div class="dashboard-stat">{{ visualizations|length }}</div>
+            <div class="dashboard-label">Visualizations</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="dashboard-card text-center">
+            <div class="dashboard-stat">{{ analyses|selectattr('status', 'equalto', 'running')|list|length }}</div>
+            <div class="dashboard-label">Running Jobs</div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Activity and Resources -->
+<div class="row">
+    <!-- Recent Samples -->
+    <div class="col-md-6">
+        <div class="dashboard-card">
+            <h5>Recent Samples</h5>
+            {% if datasets %}
+                <div class="list-group">
+                    {% for sample in datasets %}
+                        <a href="{{ url_for('malware.view', sample_id=sample.id) }}" class="list-group-item list-group-item-action">
+                            <div class="d-flex w-100 justify-content-between">
+                                <h6 class="mb-1">{{ sample.name }}</h6>
+                                <small>{{ sample.created_at|default('Unknown date', true) }}</small>
+                            </div>
+                            <p class="mb-1">Type: {{ sample.file_type }}</p>
+                            <small class="text-muted">SHA256: {{ sample.sha256[:10] }}...</small>
+                        </a>
+                    {% endfor %}
+                </div>
+                <div class="text-center mt-3">
+                    <a href="{{ url_for('malware.index') }}" class="btn btn-sm btn-outline-primary">View All Samples</a>
+                </div>
+            {% else %}
+                <p class="text-muted">No samples available. <a href="{{ url_for('malware.upload') }}">Upload one now</a>.</p>
+            {% endif %}
+        </div>
+    </div>
+    
+    <!-- Recent Jobs -->
+    <div class="col-md-6">
+        <div class="dashboard-card">
+            <h5>Recent Detonation Jobs</h5>
+            {% if analyses %}
+                <div class="list-group">
+                    {% for job in analyses %}
+                        <a href="{{ url_for('detonation.view', job_id=job.id) }}" class="list-group-item list-group-item-action">
+                            <div class="d-flex w-100 justify-content-between">
+                                <h6 class="mb-1">Job #{{ job.id }}</h6>
+                                <span class="badge {% if job.status == 'completed' %}bg-success{% elif job.status == 'failed' %}bg-danger{% elif job.status == 'running' %}bg-primary{% else %}bg-secondary{% endif %}">
+                                    {{ job.status }}
+                                </span>
+                            </div>
+                            <p class="mb-1">Sample: {{ job.sample_name or "Unknown" }}</p>
+                            <small class="text-muted">VM: {{ job.vm_type }}</small>
+                        </a>
+                    {% endfor %}
+                </div>
+                <div class="text-center mt-3">
+                    <a href="{{ url_for('detonation.index') }}" class="btn btn-sm btn-outline-primary">View All Jobs</a>
+                </div>
+            {% else %}
+                <p class="text-muted">No detonation jobs available.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
