@@ -65,7 +65,7 @@ RUN mkdir -p /app/data/uploads && \
     chmod -R 755 /app/data && \
     chmod -R 755 /app/logs
 
-# Create fallback WSGI application
+# Create fallback WSGI application - FIXED: separate the HTML variable from template_string to avoid nested quotes
 RUN cat > /app/fallback_app.py << 'EOF'
 from flask import Flask, render_template_string, jsonify
 
@@ -74,7 +74,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return render_template_string("""
+    html = """
     <!DOCTYPE html>
     <html>
     <head>
@@ -102,7 +102,8 @@ def home():
         </div>
     </body>
     </html>
-    """)
+    """
+    return render_template_string(html)
 
 @app.route("/health")
 def health():
