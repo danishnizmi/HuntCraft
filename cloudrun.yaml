@@ -26,8 +26,8 @@ spec:
         run.googleapis.com/execution-environment: "gen2"
         run.googleapis.com/vpc-access-egress: "all-traffic"
     spec:
-      # Service account - Cloud Build will substitute the project ID
-      serviceAccountName: malware-platform-sa
+      # Service account
+      serviceAccountName: malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com
       
       # Container concurrency and timeout
       containerConcurrency: 80
@@ -68,13 +68,13 @@ spec:
           
           # Startup optimization
           - name: GENERATE_TEMPLATES
-            value: "false"
+            value: "true"
           - name: INITIALIZE_GCP
             value: "true"
           - name: SKIP_DB_INIT
             value: "false"
           
-          # GCP configuration - Cloud Build will substitute the project ID
+          # GCP configuration
           - name: GCP_PROJECT_ID
             value: "$PROJECT_ID"
           - name: GCP_STORAGE_BUCKET
