@@ -5,31 +5,52 @@ import sqlite3
 import logging
 from datetime import datetime
 
-# Try to import visualization dependencies
+# Set up logger first to capture import errors
+logger = logging.getLogger(__name__)
+
+# Try to import visualization dependencies with better error handling
+VISUALIZATION_ENABLED = False
+VISUALIZATION_FALLBACK = True
+
 try:
     import pandas as pd
     import numpy as np
-    import plotly
-    import plotly.express as px
-    import plotly.graph_objects as go
-    VISUALIZATION_ENABLED = True
+    BASIC_DEPS_AVAILABLE = True
+
+    # Try to import plotly separately - we can still provide basic visualizations without it
+    try:
+        import plotly
+        import plotly.express as px
+        import plotly.graph_objects as go
+        VISUALIZATION_ENABLED = True
+    except ImportError:
+        logger.warning("Plotly not available. Basic visualization will be used instead.")
 except ImportError:
-    VISUALIZATION_ENABLED = False
-    logging.getLogger(__name__).warning("Visualization dependencies not available. Install pandas, numpy, and plotly for full functionality.")
+    BASIC_DEPS_AVAILABLE = False
+    logger.warning("Visualization dependencies not available. Install pandas, numpy, and plotly for full functionality.")
 
 # Create blueprint with shorter name
 viz_bp = Blueprint('viz', __name__, url_prefix='/viz')
-logger = logging.getLogger(__name__)
 
 def init_app(app):
     """Initialize the visualization module with the Flask app"""
-    app.register_blueprint(viz_bp)
+    # Register blueprint first to avoid initialization issues
+    try:
+        app.register_blueprint(viz_bp)
+        logger.info("Visualization blueprint registered successfully")
+    except Exception as e:
+        logger.error(f"Failed to register visualization blueprint: {e}")
+        raise
     
+    # Generate templates and static files
     with app.app_context():
-        # Generate templates and static files
-        generate_templates()
-        generate_css()
-        generate_js()
+        try:
+            generate_templates()
+            generate_css()
+            generate_js()
+            logger.info("Visualization templates and static files generated")
+        except Exception as e:
+            logger.error(f"Error generating visualization templates: {e}")
         
         # Register template filter for formatting JSON
         @app.template_filter('pprint')
@@ -41,41 +62,59 @@ def init_app(app):
 
 def create_database_schema(cursor):
     """Create the necessary database tables for the visualization module"""
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS visualizations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        description TEXT,
-        type TEXT NOT NULL,
-        result_id INTEGER,
-        config TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (result_id) REFERENCES analysis_results(id)
-    )
-    ''')
+    try:
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS visualizations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            type TEXT NOT NULL,
+            result_id INTEGER,
+            config TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (result_id) REFERENCES malware_samples(id)
+        )
+        ''')
+        logger.info("Visualization database schema created successfully")
+    except Exception as e:
+        logger.error(f"Error creating visualization database schema: {e}")
+        raise
 
 def _db_connection(row_factory=None):
     """Create a database connection with optional row factory"""
-    conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
-    if row_factory:
-        conn.row_factory = row_factory
-    return conn
+    try:
+        conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
+        if row_factory:
+            conn.row_factory = row_factory
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise
 
 # Routes
 @viz_bp.route('/')
 def index():
     """Visualization module main page"""
-    if not VISUALIZATION_ENABLED:
+    if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_FALLBACK:
         flash('Visualization is disabled due to missing dependencies. Please install pandas, numpy, and plotly.', 'warning')
         return render_template('visualization_disabled.html')
     
-    visualizations = get_visualizations()
-    return render_template('visualization_index.html', visualizations=visualizations)
+    try:
+        visualizations = get_visualizations()
+        return render_template('visualization_index.html', 
+                               visualizations=visualizations,
+                               viz_enabled=VISUALIZATION_ENABLED)
+    except Exception as e:
+        logger.error(f"Error in visualization index: {e}")
+        flash(f"Error loading visualizations: {str(e)}", "error")
+        return render_template('visualization_index.html', 
+                               visualizations=[],
+                               viz_enabled=VISUALIZATION_ENABLED)
 
 @viz_bp.route('/create', methods=['GET', 'POST'])
 def create():
     """Create visualization form and handler"""
-    if not VISUALIZATION_ENABLED:
+    if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_FALLBACK:
         flash('Visualization is disabled due to missing dependencies. Please install pandas, numpy, and plotly.', 'warning')
         return redirect(url_for('viz.index'))
         
@@ -92,11 +131,13 @@ def create():
                 recent_results = malware_module.get_recent_samples(limit=10)
             else:
                 recent_results = []
-        except ImportError as e:
+        except Exception as e:
             logger.error(f"Error importing malware module: {e}")
             recent_results = []
             
-        return render_template('visualization_select_data.html', recent_results=recent_results)
+        return render_template('visualization_select_data.html', 
+                               recent_results=recent_results,
+                               viz_enabled=VISUALIZATION_ENABLED)
     
     # Load result data
     try:
@@ -115,7 +156,10 @@ def create():
         flash('Error loading sample data', 'error')
         return redirect(url_for('viz.index'))
     
-    # Parse sample data
+    # Parse sample data and set defaults for visualization creation
+    columns = []
+    numeric_columns = []
+    
     try:
         sample_data = []
         if 'analysis_results' in sample and sample['analysis_results']:
@@ -124,46 +168,59 @@ def create():
             except:
                 sample_data = [{'error': 'Invalid JSON data'}]
         
-        # Convert to DataFrame for column selection
-        if VISUALIZATION_ENABLED and sample_data:
-            if isinstance(sample_data, dict):
-                # Convert dict to DataFrame-friendly format
-                df_data = []
-                for key, value in sample_data.items():
-                    if isinstance(value, dict):
-                        row = {'name': key}
-                        row.update(value)
-                        df_data.append(row)
-                    else:
-                        df_data.append({'name': key, 'value': value})
-                df = pd.DataFrame(df_data)
-            else:
-                df = pd.DataFrame(sample_data)
-            
-            # Get columns for selection
-            columns = df.columns.tolist()
-            numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist() if not df.empty else []
+        # Convert to DataFrame for column selection if pandas is available
+        if BASIC_DEPS_AVAILABLE and sample_data:
+            try:
+                if isinstance(sample_data, dict):
+                    # Convert dict to DataFrame-friendly format
+                    df_data = []
+                    for key, value in sample_data.items():
+                        if isinstance(value, dict):
+                            row = {'name': key}
+                            row.update(value)
+                            df_data.append(row)
+                        else:
+                            df_data.append({'name': key, 'value': value})
+                    df = pd.DataFrame(df_data)
+                else:
+                    df = pd.DataFrame(sample_data)
+                
+                # Get columns for selection
+                columns = df.columns.tolist()
+                if BASIC_DEPS_AVAILABLE:
+                    numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist() if not df.empty else []
+            except Exception as e:
+                logger.error(f"Error creating DataFrame: {e}")
+                # Fallback to simple column extraction if DataFrame creation fails
+                if isinstance(sample_data, list) and len(sample_data) > 0:
+                    columns = list(sample_data[0].keys())
+                elif isinstance(sample_data, dict):
+                    columns = list(sample_data.keys())
         else:
-            columns = []
-            numeric_columns = []
+            # Without pandas, try basic extraction of columns
+            if isinstance(sample_data, list) and len(sample_data) > 0:
+                columns = list(sample_data[0].keys())
+            elif isinstance(sample_data, dict):
+                columns = list(sample_data.keys())
     except Exception as e:
         logger.error(f"Error parsing sample data: {e}")
-        flash(f'Error parsing sample data: {str(e)}', 'error')
-        return redirect(url_for('viz.index'))
+        columns = []
+        numeric_columns = []
     
     # Set form defaults
     default_name = f"Visualization for {sample['name']}" if sample else "New Visualization"
     
-    if request.method == 'POST' and VISUALIZATION_ENABLED:
-        # Get form data
-        name = request.form.get('name', default_name)
-        description = request.form.get('description', '')
-        viz_type = request.form.get('viz_type', 'bar')
-        x_column = request.form.get('x_column')
-        y_column = request.form.get('y_column')
-        color_column = request.form.get('color_column', '')
-        
+    if request.method == 'POST':
+        # Handle form submission
         try:
+            # Get form data
+            name = request.form.get('name', default_name)
+            description = request.form.get('description', '')
+            viz_type = request.form.get('viz_type', 'bar')
+            x_column = request.form.get('x_column')
+            y_column = request.form.get('y_column')
+            color_column = request.form.get('color_column', '')
+            
             # Create visualization config
             config = {
                 'type': viz_type,
@@ -171,32 +228,33 @@ def create():
                 'y_column': y_column,
                 'color_column': color_column if color_column else None,
                 'title': name,
-                'additional_options': _get_viz_options(viz_type, request.form)
+                'additional_options': _get_viz_options(viz_type, request.form),
+                'fallback': not VISUALIZATION_ENABLED
             }
             
-            # Create the visualization
+            # Create the visualization - this will work even without full dependencies
             viz_id = create_visualization(name, description, viz_type, result_id, config)
             
             flash('Visualization created successfully!', 'success')
             return redirect(url_for('viz.view', viz_id=viz_id))
-            
         except Exception as e:
             logger.error(f"Error creating visualization: {e}")
             flash(f'Error creating visualization: {str(e)}', 'error')
     
     # GET request - show create form
     return render_template('visualization_create.html', 
-                         result_id=result_id,
-                         default_name=default_name,
-                         columns=columns,
-                         numeric_columns=numeric_columns,
-                         viz_enabled=VISUALIZATION_ENABLED,
-                         sample=sample)
+                           result_id=result_id,
+                           default_name=default_name,
+                           columns=columns,
+                           numeric_columns=numeric_columns,
+                           viz_enabled=VISUALIZATION_ENABLED,
+                           basic_deps=BASIC_DEPS_AVAILABLE,
+                           sample=sample)
 
 @viz_bp.route('/view/<int:viz_id>')
 def view(viz_id):
     """View a visualization"""
-    if not VISUALIZATION_ENABLED:
+    if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_FALLBACK:
         flash('Visualization is disabled due to missing dependencies. Please install pandas, numpy, and plotly.', 'warning')
         return redirect(url_for('viz.index'))
         
@@ -241,18 +299,26 @@ def view(viz_id):
         if VISUALIZATION_ENABLED and sample_data:
             fig = generate_visualization(sample_data, visualization['config'])
             plot_json = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+        elif BASIC_DEPS_AVAILABLE and sample_data:
+            # Generate a basic fallback visualization with less interactivity
+            fig = generate_basic_visualization(sample_data, visualization['config'])
+            try:
+                plot_json = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+            except:
+                plot_json = json.dumps(fig)
         else:
             plot_json = None
     except Exception as e:
         logger.error(f"Error generating visualization: {e}")
         flash(f'Error generating visualization: {str(e)}', 'error')
-        return redirect(url_for('viz.index'))
+        plot_json = None
     
     return render_template('visualization_view.html', 
-                         visualization=visualization,
-                         plot_json=plot_json,
-                         viz_enabled=VISUALIZATION_ENABLED,
-                         sample=sample)
+                           visualization=visualization,
+                           plot_json=plot_json,
+                           viz_enabled=VISUALIZATION_ENABLED,
+                           basic_deps=BASIC_DEPS_AVAILABLE,
+                           sample=sample)
 
 @viz_bp.route('/delete/<int:viz_id>', methods=['POST'])
 def delete(viz_id):
@@ -275,28 +341,32 @@ def api_visualizations():
     limit = request.args.get('limit', 20, type=int)
     offset = request.args.get('offset', 0, type=int)
     
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT v.*, s.name as sample_name
-        FROM visualizations v
-        LEFT JOIN malware_samples s ON v.result_id = s.id
-        ORDER BY v.created_at DESC
-        LIMIT ? OFFSET ?
-    """, (limit, offset))
-    
-    visualizations = [dict(row) for row in cursor.fetchall()]
-    
-    # Parse config
-    for viz in visualizations:
-        try:
-            viz['config'] = json.loads(viz['config'])
-        except:
-            viz['config'] = {}
-    
-    conn.close()
-    return jsonify(visualizations)
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT v.*, s.name as sample_name
+            FROM visualizations v
+            LEFT JOIN malware_samples s ON v.result_id = s.id
+            ORDER BY v.created_at DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset))
+        
+        visualizations = [dict(row) for row in cursor.fetchall()]
+        
+        # Parse config
+        for viz in visualizations:
+            try:
+                viz['config'] = json.loads(viz['config'])
+            except:
+                viz['config'] = {}
+        
+        conn.close()
+        return jsonify(visualizations)
+    except Exception as e:
+        logger.error(f"Error in API visualizations: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @viz_bp.route('/api/visualization/<int:viz_id>')
 def api_visualization(viz_id):
@@ -310,9 +380,6 @@ def api_visualization(viz_id):
 # Helper function to extract visualization options from form
 def _get_viz_options(viz_type, form_data):
     """Extract visualization-specific options from form data"""
-    if not VISUALIZATION_ENABLED:
-        return {}
-        
     options = {}
     
     if viz_type == 'bar':
@@ -334,7 +401,7 @@ def _get_viz_options(viz_type, form_data):
 def generate_visualization(data, config):
     """Generate a visualization based on the data and configuration - memory-optimized"""
     if not VISUALIZATION_ENABLED:
-        return None
+        return generate_basic_visualization(data, config)
         
     # Convert to DataFrame if needed
     if isinstance(data, dict):
@@ -440,6 +507,109 @@ def generate_visualization(data, config):
     
     return fig
 
+def generate_basic_visualization(data, config):
+    """Generate a basic visualization when Plotly is not available"""
+    if not BASIC_DEPS_AVAILABLE:
+        # Return a placeholder when even pandas/numpy are not available
+        return {
+            "data": [],
+            "layout": {
+                "title": "Visualization Not Available - Missing Dependencies",
+                "annotations": [{
+                    "text": "Please install pandas, numpy, and plotly packages.",
+                    "showarrow": False,
+                    "font": {"size": 14}
+                }]
+            }
+        }
+    
+    # Basic visualization using pandas without plotly
+    try:
+        # Convert to DataFrame if needed
+        if isinstance(data, dict):
+            df_data = []
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    row = {'name': key}
+                    row.update(value)
+                    df_data.append(row)
+                else:
+                    df_data.append({'name': key, 'value': value})
+            df = pd.DataFrame(df_data)
+        elif isinstance(data, list):
+            if len(data) > 1000:
+                import random
+                sampled_data = random.sample(data, 1000)
+                df = pd.DataFrame(sampled_data)
+            else:
+                df = pd.DataFrame(data)
+        else:
+            return {
+                "data": [],
+                "layout": {"title": "Error: Invalid data format"}
+            }
+        
+        # Get visualization parameters
+        viz_type = config.get('type', 'bar')
+        x_column = config.get('x_column')
+        y_column = config.get('y_column')
+        color_column = config.get('color_column')
+        title = config.get('title', 'Visualization')
+        
+        # Check if the columns exist
+        if x_column not in df.columns:
+            return {"data": [], "layout": {"title": f"Error: Column '{x_column}' not found"}}
+        if y_column not in df.columns:
+            return {"data": [], "layout": {"title": f"Error: Column '{y_column}' not found"}}
+        
+        # Create a simple JSON-serializable data structure for the visualization
+        # This is a simplified format that can be rendered with basic JavaScript
+        data_points = []
+        
+        # Group by color if specified
+        if color_column and color_column in df.columns:
+            groups = df.groupby(color_column)
+            
+            for name, group in groups:
+                series = {
+                    "name": str(name),
+                    "x": group[x_column].tolist(),
+                    "y": group[y_column].tolist(),
+                    "type": viz_type
+                }
+                data_points.append(series)
+        else:
+            # Single series
+            series = {
+                "name": y_column,
+                "x": df[x_column].tolist(),
+                "y": df[y_column].tolist(),
+                "type": viz_type
+            }
+            data_points.append(series)
+        
+        # Create layout
+        layout = {
+            "title": title,
+            "xaxis": {"title": x_column},
+            "yaxis": {"title": y_column},
+            "fallback": True  # Indicate this is a fallback visualization
+        }
+        
+        return {
+            "data": data_points,
+            "layout": layout
+        }
+    except Exception as e:
+        logger.error(f"Error generating basic visualization: {e}")
+        return {
+            "data": [],
+            "layout": {
+                "title": f"Error generating visualization: {str(e)}",
+                "fallback": True
+            }
+        }
+
 # Database operations - consolidated and optimized
 def create_visualization(name, description, viz_type, result_id, config):
     """Create a new visualization"""
@@ -470,72 +640,84 @@ def get_visualizations():
     limit = request.args.get('limit', 20, type=int)
     offset = request.args.get('offset', 0, type=int)
     
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT v.*, s.name as sample_name
-        FROM visualizations v
-        LEFT JOIN malware_samples s ON v.result_id = s.id
-        ORDER BY v.created_at DESC
-        LIMIT ? OFFSET ?
-    """, (limit, offset))
-    
-    visualizations = [dict(row) for row in cursor.fetchall()]
-    
-    # Parse config
-    for viz in visualizations:
-        try:
-            viz['config'] = json.loads(viz['config'])
-        except:
-            viz['config'] = {}
-    
-    conn.close()
-    return visualizations
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT v.*, s.name as sample_name
+            FROM visualizations v
+            LEFT JOIN malware_samples s ON v.result_id = s.id
+            ORDER BY v.created_at DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset))
+        
+        visualizations = [dict(row) for row in cursor.fetchall()]
+        
+        # Parse config
+        for viz in visualizations:
+            try:
+                viz['config'] = json.loads(viz['config'])
+            except:
+                viz['config'] = {}
+        
+        conn.close()
+        return visualizations
+    except Exception as e:
+        logger.error(f"Error getting visualizations: {e}")
+        return []
 
 def get_visualization_by_id(viz_id):
     """Get visualization information by ID"""
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT v.*, s.name as sample_name
-        FROM visualizations v
-        LEFT JOIN malware_samples s ON v.result_id = s.id
-        WHERE v.id = ?
-    """, (viz_id,))
-    visualization = cursor.fetchone()
-    
-    conn.close()
-    
-    if visualization:
-        # Convert to dict and parse config
-        viz_dict = dict(visualization)
-        try:
-            viz_dict['config'] = json.loads(viz_dict['config'])
-        except:
-            viz_dict['config'] = {}
-        return viz_dict
-    else:
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT v.*, s.name as sample_name
+            FROM visualizations v
+            LEFT JOIN malware_samples s ON v.result_id = s.id
+            WHERE v.id = ?
+        """, (viz_id,))
+        visualization = cursor.fetchone()
+        
+        conn.close()
+        
+        if visualization:
+            # Convert to dict and parse config
+            viz_dict = dict(visualization)
+            try:
+                viz_dict['config'] = json.loads(viz_dict['config'])
+            except:
+                viz_dict['config'] = {}
+            return viz_dict
+        else:
+            return None
+    except Exception as e:
+        logger.error(f"Error getting visualization by ID: {e}")
         return None
 
 def get_visualizations_for_dashboard():
     """Get a small number of visualizations for the dashboard"""
     # Used by web_interface module
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT v.id, v.name, v.type, v.created_at, s.name as sample_name
-        FROM visualizations v
-        LEFT JOIN malware_samples s ON v.result_id = s.id
-        ORDER BY v.created_at DESC
-        LIMIT 5
-    """)
-    
-    visualizations = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    return visualizations
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT v.id, v.name, v.type, v.created_at, s.name as sample_name
+            FROM visualizations v
+            LEFT JOIN malware_samples s ON v.result_id = s.id
+            ORDER BY v.created_at DESC
+            LIMIT 5
+        """)
+        
+        visualizations = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return visualizations
+    except Exception as e:
+        logger.error(f"Error getting dashboard visualizations: {e}")
+        return []
 
 # CSS generator - only called when explicitly requested
 def generate_css():
@@ -552,13 +734,19 @@ def generate_css():
     .viz-thumbnail { height: 200px; width: 100%; border: 1px solid #ddd; border-radius: 5px; overflow: hidden; }
     .viz-controls { display: flex; justify-content: space-between; margin-bottom: 15px; }
     .viz-fullscreen { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1050; background: white; padding: 20px; }
+    .viz-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; background-color: #f5f5f5; color: #666; text-align: center; padding: 20px; }
+    .viz-placeholder i { font-size: 3rem; margin-bottom: 15px; color: #aaa; }
+    .viz-placeholder-message { margin-top: 15px; }
     """
     
     # Write CSS to file
-    os.makedirs('static/css', exist_ok=True)
-    with open('static/css/viz_module.css', 'w') as f:
-        f.write(css)
-    logger.info("Created visualization CSS file")
+    try:
+        os.makedirs('static/css', exist_ok=True)
+        with open('static/css/viz_module.css', 'w') as f:
+            f.write(css)
+        logger.info("Created visualization CSS file")
+    except Exception as e:
+        logger.error(f"Error generating CSS: {e}")
 
 # JS generator - only called when explicitly requested
 def generate_js():
@@ -594,14 +782,93 @@ def generate_js():
                 window.dispatchEvent(new Event('resize'));
             });
         }
+
+        // Fallback visualization renderer - for when Plotly is not available
+        const fallbackContainer = document.getElementById('fallback-visualization-container');
+        if (fallbackContainer) {
+            const dataElement = document.getElementById('visualization-data');
+            if (dataElement) {
+                try {
+                    const vizData = JSON.parse(dataElement.textContent);
+                    if (vizData && vizData.layout && vizData.layout.fallback) {
+                        renderFallbackVisualization(fallbackContainer, vizData);
+                    }
+                } catch (e) {
+                    console.error('Error parsing visualization data:', e);
+                    fallbackContainer.innerHTML = '<div class="viz-placeholder"><p>Error loading visualization data</p></div>';
+                }
+            }
+        }
     });
+
+    // Simple fallback visualization renderer
+    function renderFallbackVisualization(container, vizData) {
+        if (!vizData || !vizData.data || !vizData.layout) {
+            container.innerHTML = '<div class="viz-placeholder"><p>No visualization data available</p></div>';
+            return;
+        }
+
+        const title = vizData.layout.title || 'Visualization';
+        const xAxisTitle = vizData.layout.xaxis?.title || '';
+        const yAxisTitle = vizData.layout.yaxis?.title || '';
+        
+        // Create a table representation of the data
+        let tableHtml = `
+            <div class="card">
+                <div class="card-header">${title}</div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped">
+                            <thead>
+                                <tr>
+                                    <th>${xAxisTitle}</th>
+                                    <th>${yAxisTitle}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+        `;
+        
+        // Add rows for each data point (limited to 100 for performance)
+        const maxRows = 100;
+        let rowCount = 0;
+        
+        vizData.data.forEach(series => {
+            if (series.x && series.y) {
+                for (let i = 0; i < Math.min(series.x.length, maxRows - rowCount); i++) {
+                    tableHtml += `<tr><td>${series.x[i]}</td><td>${series.y[i]}</td></tr>`;
+                    rowCount++;
+                }
+            }
+        });
+        
+        if (rowCount >= maxRows) {
+            tableHtml += `<tr><td colspan="2" class="text-muted text-center">Showing ${maxRows} of ${vizData.data.reduce((sum, series) => sum + (series.x ? series.x.length : 0), 0)} data points</td></tr>`;
+        }
+        
+        tableHtml += `
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="alert alert-info mt-3">
+                        <i class="fas fa-info-circle"></i> 
+                        This is a simplified view of the data. Install Plotly for interactive visualizations.
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        container.innerHTML = tableHtml;
+    }
     """
     
     # Write JS to file
-    os.makedirs('static/js', exist_ok=True)
-    with open('static/js/viz_module.js', 'w') as f:
-        f.write(js)
-    logger.info("Created visualization JS file")
+    try:
+        os.makedirs('static/js', exist_ok=True)
+        with open('static/js/viz_module.js', 'w') as f:
+            f.write(js)
+        logger.info("Created visualization JS file")
+    except Exception as e:
+        logger.error(f"Error generating JS: {e}")
 
 # Template generator
 def generate_templates():
@@ -648,6 +915,14 @@ def generate_templates():
     </a>
 </div>
 
+{% if not viz_enabled %}
+<div class="alert alert-warning">
+    <h4><i class="fas fa-exclamation-triangle"></i> Limited Visualization Mode</h4>
+    <p>The full visualization capabilities are not available because some dependencies are missing.</p>
+    <p>Basic visualization functionality is still available, but for the best experience, please install the required packages: pandas, numpy, and plotly.</p>
+</div>
+{% endif %}
+
 {% if visualizations %}
     <div class="row">
         {% for viz in visualizations %}
@@ -691,7 +966,7 @@ def generate_templates():
     <a href="{{ url_for('viz.index') }}" class="btn btn-outline-secondary">Back to List</a>
 </div>
 
-{% if not viz_enabled %}
+{% if not basic_deps %}
 <div class="alert alert-warning">
     <h4>Visualization Module Disabled</h4>
     <p>The visualization module is currently disabled because the required dependencies are not installed.</p>
@@ -702,7 +977,14 @@ def generate_templates():
         <li>plotly</li>
     </ul>
 </div>
-{% else %}
+{% elif not viz_enabled %}
+<div class="alert alert-warning">
+    <h4><i class="fas fa-exclamation-triangle"></i> Limited Visualization Mode</h4>
+    <p>The full visualization capabilities are not available because Plotly is missing.</p>
+    <p>Basic visualization functionality is still available, but for the best experience, please install Plotly.</p>
+</div>
+{% endif %}
+
 <div class="card mb-4">
     <div class="card-header bg-primary text-white">
         <h5 class="card-title mb-0">Sample: {{ sample.name }}</h5>
@@ -860,7 +1142,6 @@ def generate_templates():
         </form>
     </div>
 </div>
-{% endif %}
 {% endblock %}
 """,
 
@@ -872,7 +1153,9 @@ def generate_templates():
 {% block head %}
 {{ super() }}
 <link href="{{ url_for('static', filename='css/viz_module.css') }}" rel="stylesheet">
+{% if viz_enabled %}
 <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+{% endif %}
 <script src="{{ url_for('static', filename='js/viz_module.js') }}" defer></script>
 {% endblock %}
 
@@ -887,17 +1170,37 @@ def generate_templates():
     </div>
 </div>
 
-{% if not viz_enabled %}
+{% if not basic_deps %}
 <div class="alert alert-warning">
     <h4>Visualization Module Disabled</h4>
     <p>The visualization module is currently disabled because the required dependencies are not installed.</p>
 </div>
-{% else %}
+{% elif not viz_enabled %}
+<div class="alert alert-warning">
+    <h4><i class="fas fa-exclamation-triangle"></i> Limited Visualization Mode</h4>
+    <p>The full visualization capabilities are not available because Plotly is missing.</p>
+    <p>A simplified view of the data is shown below. For the best experience, please install Plotly.</p>
+</div>
+{% endif %}
+
 <div class="row">
     <div class="col-md-8">
         <div class="card mb-4">
             <div class="card-body">
+                {% if viz_enabled and plot_json %}
                 <div id="visualization-container" class="viz-container"></div>
+                {% else %}
+                <div id="fallback-visualization-container" class="viz-container">
+                    <div class="viz-placeholder">
+                        <div class="text-center">
+                            <i class="fas fa-chart-bar"></i>
+                            <h4>Visualization Not Available</h4>
+                            <p class="viz-placeholder-message">Install visualization dependencies for full functionality.</p>
+                        </div>
+                    </div>
+                </div>
+                <script id="visualization-data" type="application/json">{{ plot_json|safe }}</script>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -958,7 +1261,6 @@ def generate_templates():
         </div>
     </div>
 </div>
-{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -990,6 +1292,14 @@ def generate_templates():
     <h1>Select Data for Visualization</h1>
     <a href="{{ url_for('viz.index') }}" class="btn btn-outline-secondary">Back to List</a>
 </div>
+
+{% if not viz_enabled %}
+<div class="alert alert-warning">
+    <h4><i class="fas fa-exclamation-triangle"></i> Limited Visualization Mode</h4>
+    <p>The full visualization capabilities are not available because some dependencies are missing.</p>
+    <p>Basic visualization functionality is still available, but for the best experience, please install the required packages: pandas, numpy, and plotly.</p>
+</div>
+{% endif %}
 
 {% if recent_results %}
     <div class="card">
@@ -1038,11 +1348,15 @@ def generate_templates():
     }
     
     # Create templates directory
-    os.makedirs('templates', exist_ok=True)
-    
-    # Generate templates if they don't exist
-    for template_name, template_content in templates.items():
-        if not os.path.exists(f'templates/{template_name}'):
-            with open(f'templates/{template_name}', 'w') as f:
-                f.write(template_content)
-            logger.info(f"Created visualization template: {template_name}")
+    try:
+        os.makedirs('templates', exist_ok=True)
+        
+        # Generate templates if they don't exist
+        for template_name, template_content in templates.items():
+            template_path = f'templates/{template_name}'
+            if not os.path.exists(template_path):
+                with open(template_path, 'w') as f:
+                    f.write(template_content)
+                logger.info(f"Created visualization template: {template_name}")
+    except Exception as e:
+        logger.error(f"Error generating templates: {e}")
