@@ -98,35 +98,14 @@ RUN echo "from flask import Blueprint, render_template_string, redirect, url_for
     echo "    app.register_blueprint(direct_bp)" >> /app/direct_routes.py && \
     echo "    print('Direct routes registered successfully')" >> /app/direct_routes.py
 
-# Create web blueprint URL prefix fixer - FIXED THE SYNTAX ERROR
-RUN echo "#!/usr/bin/env python3" > /app/fix_blueprint.py && \
-    echo "import os, sys, re" >> /app/fix_blueprint.py && \
-    echo "" >> /app/fix_blueprint.py && \
-    echo "def fix_web_blueprint():" >> /app/fix_blueprint.py && \
-    echo "    filepath = '/app/web_interface.py'" >> /app/fix_blueprint.py && \
-    echo "    if not os.path.exists(filepath):" >> /app/fix_blueprint.py && \
-    echo "        print(f'ERROR: {filepath} not found')" >> /app/fix_blueprint.py && \
-    echo "        return False" >> /app/fix_blueprint.py && \
-    echo "    try:" >> /app/fix_blueprint.py && \
-    echo "        with open(filepath, 'r') as f:" >> /app/fix_blueprint.py && \
-    echo "            content = f.read()" >> /app/fix_blueprint.py && \
-    echo "        content = re.sub(r\"web_bp = Blueprint\\('web', __name__(?:, url_prefix=[^']*)?(?:\\)\", \"web_bp = Blueprint('web', __name__, url_prefix='')\", content)" >> /app/fix_blueprint.py && \
-    echo "        if 'def index():' in content and '@web_bp.route(\\'/\\')' not in content:" >> /app/fix_blueprint.py && \
-    echo "            content = content.replace('def index():', '@web_bp.route(\\\"/\\\")\\ndef index():')" >> /app/fix_blueprint.py && \
-    echo "        with open(filepath, 'w') as f:" >> /app/fix_blueprint.py && \
-    echo "            f.write(content)" >> /app/fix_blueprint.py && \
-    echo "        print(f'Successfully fixed web blueprint in {filepath}')" >> /app/fix_blueprint.py && \
-    echo "        return True" >> /app/fix_blueprint.py && \
-    echo "    except Exception as e:" >> /app/fix_blueprint.py && \
-    echo "        print(f'Error fixing web blueprint: {e}')" >> /app/fix_blueprint.py && \
-    echo "        return False" >> /app/fix_blueprint.py && \
-    echo "" >> /app/fix_blueprint.py && \
-    echo "if __name__ == '__main__':" >> /app/fix_blueprint.py && \
-    echo "    if fix_web_blueprint():" >> /app/fix_blueprint.py && \
-    echo "        sys.exit(0)" >> /app/fix_blueprint.py && \
-    echo "    else:" >> /app/fix_blueprint.py && \
-    echo "        sys.exit(1)" >> /app/fix_blueprint.py && \
-    chmod +x /app/fix_blueprint.py
+# Create a simple script to check for web_interface.py file
+RUN echo "#!/bin/bash" > /app/check_web_interface.sh && \
+    echo "if [ -f /app/web_interface.py ]; then" >> /app/check_web_interface.sh && \
+    echo "  echo 'web_interface.py exists'" >> /app/check_web_interface.sh && \
+    echo "else" >> /app/check_web_interface.sh && \
+    echo "  echo 'WARNING: web_interface.py not found!'" >> /app/check_web_interface.sh && \
+    echo "fi" >> /app/check_web_interface.sh && \
+    chmod +x /app/check_web_interface.sh
 
 # Create a robust health check script - simplified approach
 RUN echo "#!/bin/bash" > /app/health-check.sh && \
@@ -164,8 +143,10 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
     echo 'mkdir -p /app/static/css' >> /app/start.sh && \
     echo 'mkdir -p /app/static/js' >> /app/start.sh && \
     echo 'mkdir -p /app/templates' >> /app/start.sh && \
-    echo 'if [ -f "/app/fix_blueprint.py" ]; then' >> /app/start.sh && \
-    echo '  python /app/fix_blueprint.py || echo "Warning: Could not fix blueprint"' >> /app/start.sh && \
+    echo 'if [ -f "/app/web_interface.py" ]; then' >> /app/start.sh && \
+    echo '  echo "Web interface module found"' >> /app/start.sh && \
+    echo 'else' >> /app/start.sh && \
+    echo '  echo "Warning: web_interface.py not found, web UI may not function properly"' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
     echo 'if [ "$GENERATE_TEMPLATES" = "true" ]; then' >> /app/start.sh && \
     echo '  echo "Template generation is enabled"' >> /app/start.sh && \
@@ -193,8 +174,8 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
 # Copy application code 
 COPY . .
 
-# Fix web blueprint URL prefix issue
-RUN python /app/fix_blueprint.py || echo "Warning: Failed to fix web blueprint. Root routing issues may persist."
+# Run the web interface check script instead of fix_blueprint.py
+RUN /app/check_web_interface.sh
 
 # Expose port
 EXPOSE 8080
