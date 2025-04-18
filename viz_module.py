@@ -8,9 +8,12 @@ from datetime import datetime
 # Set up logger first to capture import errors
 logger = logging.getLogger(__name__)
 
+# Create blueprint immediately
+viz_bp = Blueprint('viz', __name__, url_prefix='/viz')
+
 # Try to import visualization dependencies with better error handling
 VISUALIZATION_ENABLED = False
-VISUALIZATION_FALLBACK = True
+BASIC_DEPS_AVAILABLE = False
 
 try:
     import pandas as pd
@@ -23,14 +26,11 @@ try:
         import plotly.express as px
         import plotly.graph_objects as go
         VISUALIZATION_ENABLED = True
+        logger.info("Full visualization capabilities available (pandas, numpy, plotly)")
     except ImportError:
         logger.warning("Plotly not available. Basic visualization will be used instead.")
 except ImportError:
-    BASIC_DEPS_AVAILABLE = False
     logger.warning("Visualization dependencies not available. Install pandas, numpy, and plotly for full functionality.")
-
-# Create blueprint with shorter name
-viz_bp = Blueprint('viz', __name__, url_prefix='/viz')
 
 def init_app(app):
     """Initialize the visualization module with the Flask app"""
@@ -42,15 +42,15 @@ def init_app(app):
         logger.error(f"Failed to register visualization blueprint: {e}")
         raise
     
-    # Generate templates and static files
-    with app.app_context():
-        try:
-            generate_templates()
-            generate_css()
-            generate_js()
-            logger.info("Visualization templates and static files generated")
-        except Exception as e:
-            logger.error(f"Error generating visualization templates: {e}")
+    # Continue with other initialization in a safer way
+    try:
+        # Generate templates and static files
+        with app.app_context():
+            if app.config.get('GENERATE_TEMPLATES', False):
+                generate_templates()
+                generate_css()
+                generate_js()
+                logger.info("Visualization templates and static files generated")
         
         # Register template filter for formatting JSON
         @app.template_filter('pprint')
@@ -59,6 +59,11 @@ def init_app(app):
                 return json.dumps(value, indent=2)
             except:
                 return str(value)
+        
+        logger.info("Visualization module initialized successfully")
+    except Exception as e:
+        logger.error(f"Error in visualization module initialization: {e}")
+        # Don't re-raise to allow app to start with limited functionality
 
 def create_database_schema(cursor):
     """Create the necessary database tables for the visualization module"""
@@ -83,19 +88,56 @@ def create_database_schema(cursor):
 def _db_connection(row_factory=None):
     """Create a database connection with optional row factory"""
     try:
-        conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
-        if row_factory:
-            conn.row_factory = row_factory
-        return conn
-    except Exception as e:
-        logger.error(f"Database connection error: {e}")
-        raise
+        from database import get_db_connection
+        return get_db_connection(row_factory)
+    except ImportError:
+        # Fallback if database.py is not available
+        try:
+            conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
+            if row_factory:
+                conn.row_factory = row_factory
+            return conn
+        except Exception as e:
+            logger.error(f"Database connection error: {e}")
+            raise
+
+def execute_query(query, params=(), fetch_one=False, commit=False):
+    """Execute a database query with unified error handling"""
+    try:
+        from database import execute_query as db_execute_query
+        return db_execute_query(query, params, fetch_one, commit)
+    except ImportError:
+        # Fallback if database.py is not available
+        db = _db_connection()
+        cursor = db.cursor()
+        
+        try:
+            cursor.execute(query, params)
+            
+            if fetch_one:
+                result = cursor.fetchone()
+            elif not commit:
+                result = cursor.fetchall()
+            else:
+                result = None
+                
+            if commit:
+                db.commit()
+                
+            return result
+        except Exception as e:
+            if commit:
+                db.rollback()
+            logger.error(f"Error executing query: {str(e)}\nQuery: {query}\nParams: {params}")
+            raise
+        finally:
+            db.close()
 
 # Routes
 @viz_bp.route('/')
 def index():
     """Visualization module main page"""
-    if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_FALLBACK:
+    if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_ENABLED:
         flash('Visualization is disabled due to missing dependencies. Please install pandas, numpy, and plotly.', 'warning')
         return render_template('visualization_disabled.html')
     
@@ -114,7 +156,7 @@ def index():
 @viz_bp.route('/create', methods=['GET', 'POST'])
 def create():
     """Create visualization form and handler"""
-    if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_FALLBACK:
+    if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_ENABLED:
         flash('Visualization is disabled due to missing dependencies. Please install pandas, numpy, and plotly.', 'warning')
         return redirect(url_for('viz.index'))
         
@@ -187,8 +229,7 @@ def create():
                 
                 # Get columns for selection
                 columns = df.columns.tolist()
-                if BASIC_DEPS_AVAILABLE:
-                    numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist() if not df.empty else []
+                numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist() if not df.empty else []
             except Exception as e:
                 logger.error(f"Error creating DataFrame: {e}")
                 # Fallback to simple column extraction if DataFrame creation fails
@@ -254,7 +295,7 @@ def create():
 @viz_bp.route('/view/<int:viz_id>')
 def view(viz_id):
     """View a visualization"""
-    if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_FALLBACK:
+    if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_ENABLED:
         flash('Visualization is disabled due to missing dependencies. Please install pandas, numpy, and plotly.', 'warning')
         return redirect(url_for('viz.index'))
         
