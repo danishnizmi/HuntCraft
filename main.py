@@ -26,6 +26,9 @@ MODULES = {
     'viz': 'viz_module'
 }
 
+# Module initialization order - ensures dependencies are loaded properly
+MODULE_INIT_ORDER = ['web', 'malware', 'detonation', 'viz']
+
 # Track module initialization status
 module_status = {name: {'initialized': False, 'error': None} for name in MODULES}
 
@@ -71,6 +74,10 @@ def initialize_module(app, module_name, critical=False):
         bool: True if initialization succeeded, False otherwise
     """
     try:
+        if module_status[module_name]['initialized']:
+            logger.info(f"Module {module_name} already initialized, skipping")
+            return True
+            
         module = get_module(module_name)
         if not module:
             logger.error(f"Failed to import module {module_name}")
@@ -98,37 +105,6 @@ def initialize_module(app, module_name, critical=False):
         if critical:
             raise
         return False
-
-def lazy_initialize_modules(app):
-    """Initialize non-critical modules in a background thread.
-    
-    This function runs in a separate thread and initializes modules
-    that aren't critical for the initial application startup.
-    
-    Args:
-        app: Flask application
-    """
-    with app.app_context():
-        logger.info("Starting background initialization of modules")
-        
-        # Add slight delay to ensure the main app has started
-        time.sleep(2)
-        
-        # First initialize critical modules
-        critical_modules = ['web', 'malware']
-        for module_name in critical_modules:
-            if not module_status[module_name]['initialized']:
-                initialize_module(app, module_name, critical=True)
-        
-        # Then initialize non-critical modules
-        non_critical_modules = [m for m in MODULES if m not in critical_modules]
-        for module_name in non_critical_modules:
-            if not module_status[module_name]['initialized']:
-                initialize_module(app, module_name, critical=False)
-                # Add short pause between module initializations to prevent resource spikes
-                time.sleep(1)
-        
-        logger.info("Background module initialization completed")
 
 def load_config(app, test_config=None):
     """Load application configuration from various sources.
@@ -510,28 +486,37 @@ def create_app(test_config=None):
         # Initialize database first (always needed)
         try:
             from database import init_app as init_db
-            init_db(app)
-            logger.info("Database initialization complete")
+            with app.app_context():
+                init_db(app)
+                logger.info("Database initialization complete")
         except Exception as e:
             logger.error(f"Error initializing database: {str(e)}")
             raise
         
-        # Initialize critical web interface module immediately
-        try:
-            initialize_module(app, 'web', critical=True)
-            logger.info("Web interface module initialized")
-        except Exception as e:
-            logger.error(f"Error initializing web interface: {str(e)}")
-            # Continue even if web interface fails - health endpoints should work
-        
-        # Ensure basic templates exist
+        # Initialize all modules in a defined order
+        # This ensures all blueprints are registered before handling requests
         with app.app_context():
+            # Process modules in the predefined order
+            for module_name in MODULE_INIT_ORDER:
+                try:
+                    is_critical = module_name == 'web'  # Web module is critical
+                    if not module_status[module_name]['initialized']:
+                        initialize_module(app, module_name, critical=is_critical)
+                except Exception as e:
+                    logger.error(f"Error initializing module {module_name}: {str(e)}")
+                    if module_name == 'web':  # Only the web module failure should stop app startup
+                        raise
+            
+            # Ensure basic templates exist
             ensure_index_template(app)
-        
-        # Start background thread for other modules
-        bg_thread = threading.Thread(target=lazy_initialize_modules, args=(app,))
-        bg_thread.daemon = True
-        bg_thread.start()
+            
+            # Mark application as ready here
+            try:
+                from app_ready import mark_app_ready
+                mark_app_ready()
+                logger.info("Application marked as ready")
+            except Exception as e:
+                logger.warning(f"Could not mark application as ready: {str(e)}")
         
         logger.info(f"Application startup completed in {time.time() - start_time:.2f} seconds")
         return app
@@ -630,3 +615,10 @@ if __name__ == "__main__":
 else:
     # When imported, prepare for WSGI
     app = create_app()
+
+# Mark application as ready when fully initialized
+try:
+    from app_ready import mark_app_ready
+    mark_app_ready()
+except Exception:
+    pass
