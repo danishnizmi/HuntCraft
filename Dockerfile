@@ -98,7 +98,7 @@ RUN echo "from flask import Blueprint, render_template_string, redirect, url_for
     echo "    app.register_blueprint(direct_bp)" >> /app/direct_routes.py && \
     echo "    print('Direct routes registered successfully')" >> /app/direct_routes.py
 
-# Create web blueprint URL prefix fixer - simplified approach
+# Create web blueprint URL prefix fixer - FIXED SYNTAX ERROR HERE
 RUN echo "#!/usr/bin/env python3" > /app/fix_blueprint.py && \
     echo "import os, sys, re" >> /app/fix_blueprint.py && \
     echo "" >> /app/fix_blueprint.py && \
@@ -112,7 +112,7 @@ RUN echo "#!/usr/bin/env python3" > /app/fix_blueprint.py && \
     echo "            content = f.read()" >> /app/fix_blueprint.py && \
     echo "        content = re.sub(r\"web_bp = Blueprint\\('web', __name__(?:, url_prefix=[^']*)?(?:\\)\", \"web_bp = Blueprint('web', __name__, url_prefix='')\", content)" >> /app/fix_blueprint.py && \
     echo "        if 'def index():' in content and '@web_bp.route(\\'/\\')' not in content:" >> /app/fix_blueprint.py && \
-    echo "            content = content.replace('def index():', '@web_bp.route(\\'/')\\\ndef index():')" >> /app/fix_blueprint.py && \
+    echo "            content = content.replace('def index():', '@web_bp.route(\\\"/\\\")\\ndef index():')" >> /app/fix_blueprint.py && \
     echo "        with open(filepath, 'w') as f:" >> /app/fix_blueprint.py && \
     echo "            f.write(content)" >> /app/fix_blueprint.py && \
     echo "        print(f'Successfully fixed web blueprint in {filepath}')" >> /app/fix_blueprint.py && \
