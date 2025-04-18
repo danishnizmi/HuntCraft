@@ -7,7 +7,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 # Set up logger first
 logger = logging.getLogger(__name__)
 
-# Create blueprint with EMPTY url_prefix
+# Create blueprint with EMPTY url_prefix - THIS IS CRITICAL FOR FIXING 404 ISSUES
 web_bp = Blueprint('web', __name__, url_prefix='')
 login_manager = LoginManager()
 
@@ -53,11 +53,46 @@ def init_app(app):
             
             # Generate templates
             generate_base_templates()
+            
+            # Register direct root route on app as fallback
+            app.add_url_rule('/', 'direct_root', direct_root)
+            logger.info("Registered direct root route as fallback")
         
         logger.info("Web interface module initialized successfully")
     except Exception as e:
         logger.error(f"Error in web interface module initialization: {e}")
         # Don't re-raise to allow app to start with limited functionality
+
+# Direct root fallback route - registered directly on the app
+def direct_root():
+    """Direct root route handler - fallback."""
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Malware Detonation Platform</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+                h1 {{ color: #4a6fa5; }}
+                .links {{ margin-top: 20px; }}
+                .links a {{ display: inline-block; margin: 0 10px; color: #4a6fa5; text-decoration: none; }}
+                .links a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <h1>Malware Detonation Platform</h1>
+            <p>Welcome to the Malware Detonation Platform.</p>
+            <div class="links">
+                <a href="/malware">Malware Analysis</a>
+                <a href="/detonation">Detonation Service</a>
+                <a href="/viz">Visualizations</a>
+            </div>
+        </body>
+        </html>
+        """
 
 def handle_server_error(e):
     """Handle 500 errors gracefully"""
@@ -231,7 +266,7 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Routes
+# Routes - Make sure the index route has @web_bp.route('/') decorator!
 @web_bp.route('/')
 def index():
     """Home page"""
@@ -344,9 +379,7 @@ def login():
             <h1>Malware Detonation Platform</h1>
             <div class="login-form">
                 <h2>Login</h2>
-                {{% if error %}}
-                <div class="error">{{ error }}</div>
-                {{% endif %}}
+                {{'<div class="error">' + error + '</div>' if error else ''}}
                 <form method="POST">
                     <div>
                         <input type="text" id="username" name="username" placeholder="Username" required>
