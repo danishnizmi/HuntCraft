@@ -35,7 +35,7 @@ class Config:
     VM_SUBNET = os.environ.get('VM_SUBNET', 'detonation-subnet')
     VM_MACHINE_TYPE = os.environ.get('VM_MACHINE_TYPE', 'e2-medium')
     VM_IMAGE_FAMILY = os.environ.get('VM_IMAGE_FAMILY', 'detonation-vm')
-    VM_SERVICE_ACCOUNT = os.environ.get('VM_SERVICE_ACCOUNT', f"detonation-vm@{PROJECT_ID}.iam.gserviceaccount.com")
+    VM_SERVICE_ACCOUNT = os.environ.get('VM_SERVICE_ACCOUNT', f"detonation-vm@{PROJECT_ID}.iam.gserviceaccount.com" if PROJECT_ID else "detonation-vm@example.com")
     
     # Upload and feature limits
     MAX_UPLOAD_SIZE_MB = int(os.environ.get('MAX_UPLOAD_SIZE_MB', 100))
@@ -58,10 +58,17 @@ class Config:
     ENABLE_DATA_EXPORT = os.environ.get('ENABLE_DATA_EXPORT', 'True').lower() in ('true', '1', 't')
     ENABLE_VISUALIZATION = os.environ.get('ENABLE_VISUALIZATION', 'True').lower() in ('true', '1', 't')
     
-    # Secret Manager function - FIXED to handle missing secret_id
     @classmethod
-    def get_secret(cls, secret_id=None, version="latest"):
-        """Get secret from Secret Manager or environment fallback"""
+    def get_secret(cls, secret_id, version="latest"):
+        """Get secret from Secret Manager or environment fallback
+        
+        Args:
+            secret_id (str): The secret ID to retrieve
+            version (str): The version of the secret to retrieve
+            
+        Returns:
+            str: The secret value
+        """
         if not secret_id:
             return None  # Return None if no secret_id provided
             
