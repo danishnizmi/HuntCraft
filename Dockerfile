@@ -98,22 +98,13 @@ RUN echo "from flask import Blueprint, render_template_string, redirect, url_for
     echo "    app.register_blueprint(direct_bp)" >> /app/direct_routes.py && \
     echo "    print('Direct routes registered successfully')" >> /app/direct_routes.py
 
-# Create a simple script to check for web_interface.py file
-RUN echo "#!/bin/bash" > /app/check_web_interface.sh && \
-    echo "if [ -f /app/web_interface.py ]; then" >> /app/check_web_interface.sh && \
-    echo "  echo 'web_interface.py exists'" >> /app/check_web_interface.sh && \
-    echo "else" >> /app/check_web_interface.sh && \
-    echo "  echo 'WARNING: web_interface.py not found!'" >> /app/check_web_interface.sh && \
-    echo "fi" >> /app/check_web_interface.sh && \
-    chmod +x /app/check_web_interface.sh
-
-# Create a robust health check script - simplified approach
+# Create a simple health check script
 RUN echo "#!/bin/bash" > /app/health-check.sh && \
     echo "echo '{\"status\": \"healthy\", \"timestamp\": \"'$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")'\"}'"> /app/health-check.sh && \
     echo "exit 0" >> /app/health-check.sh && \
     chmod +x /app/health-check.sh
 
-# Create app readiness marker - simplified approach
+# Create app readiness marker
 RUN echo "import os, atexit" > /app/app_ready.py && \
     echo "" >> /app/app_ready.py && \
     echo "def mark_app_ready():" >> /app/app_ready.py && \
@@ -173,9 +164,6 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
 
 # Copy application code 
 COPY . .
-
-# Run the web interface check script instead of fix_blueprint.py
-RUN /app/check_web_interface.sh
 
 # Expose port
 EXPOSE 8080
