@@ -11,49 +11,47 @@ steps:
         
         # Create required storage buckets
         echo "Creating storage buckets..."
-        gsutil mb -l ${_REGION} gs://malware-samples-$PROJECT_ID || echo "Bucket already exists"
-        gsutil mb -l ${_REGION} gs://detonation-results-$PROJECT_ID || echo "Bucket already exists"
+        gsutil mb -l ${_REGION} gs://malware-samples-$PROJECT_ID 2>/dev/null || echo "Bucket already exists"
+        gsutil mb -l ${_REGION} gs://detonation-results-$PROJECT_ID 2>/dev/null || echo "Bucket already exists"
         
         # Create Pub/Sub topic and subscription for notifications
         echo "Setting up Pub/Sub..."
-        gcloud pubsub topics create detonation-notifications || echo "Topic already exists"
-        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications || echo "Subscription already exists"
+        gcloud pubsub topics create detonation-notifications 2>/dev/null || echo "Topic already exists"
+        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications 2>/dev/null || echo "Subscription already exists"
         
         # Create service account if it doesn't exist
         echo "Setting up service account..."
-        gcloud iam service-accounts describe malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com || \
-        gcloud iam service-accounts create malware-platform-sa \
-          --display-name="Malware Detonation Platform Service Account"
+        SA_EXISTS=$(gcloud iam service-accounts list --filter="email:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" --format="value(email)" | grep -c malware-platform-sa || echo "0")
         
-        # Ensure service account has required roles
+        if [ "$SA_EXISTS" -eq "0" ]; then
+          echo "Creating service account malware-platform-sa..."
+          gcloud iam service-accounts create malware-platform-sa \
+            --display-name="Malware Detonation Platform Service Account" || echo "Failed to create service account, may already exist"
+        else
+          echo "Service account malware-platform-sa already exists"
+        fi
+        
+        # Grant IAM roles using --condition=None flag
         echo "Granting roles to service account..."
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/storage.admin" || echo "Role binding already exists"
-          
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/pubsub.publisher" || echo "Role binding already exists"
-          
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/pubsub.subscriber" || echo "Role binding already exists"
-          
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/logging.logWriter" || echo "Role binding already exists"
-          
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/run.admin" || echo "Role binding already exists"
-          
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/compute.admin" || echo "Role binding already exists"
-          
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/secretmanager.secretAccessor" || echo "Role binding already exists"
+        
+        # Helper function for role binding
+        grant_role() {
+          local role=$1
+          echo "Granting role $role..."
+          gcloud projects add-iam-policy-binding $PROJECT_ID \
+            --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+            --role="$role" \
+            --condition=None > /dev/null 2>&1 || echo "Role binding for $role failed or already exists"
+        }
+        
+        # Grant all required roles
+        grant_role "roles/storage.admin"
+        grant_role "roles/pubsub.publisher"
+        grant_role "roles/pubsub.subscriber"
+        grant_role "roles/logging.logWriter"
+        grant_role "roles/run.admin"
+        grant_role "roles/compute.admin"
+        grant_role "roles/secretmanager.secretAccessor"
         
         echo "Infrastructure setup complete"
 
@@ -88,16 +86,21 @@ steps:
         sed "s/\$PROJECT_ID/$PROJECT_ID/g" | \
         sed "s/\$COMMIT_SHA/$COMMIT_SHA/g" > processed_cloudrun.yaml
         
+        echo "Substitutions applied to cloudrun.yaml"
+        
         # Deploy using the processed YAML file
+        echo "Deploying service to Cloud Run..."
         gcloud run services replace processed_cloudrun.yaml \
           --platform=managed \
           --region=${_REGION}
         
         # Allow public access if needed
+        echo "Configuring public access..."
         gcloud run services add-iam-policy-binding malware-detonation-platform \
           --member="allUsers" \
           --role="roles/run.invoker" \
-          --region=${_REGION}
+          --region=${_REGION} \
+          --condition=None
           
         echo "Deployment to Cloud Run complete"
 
@@ -121,11 +124,16 @@ steps:
         echo "Verifying deployment..."
         
         # Get service URL without using a variable that Cloud Build might misinterpret
-        echo "Service URL: $(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)')"
+        SERVICE_URL=$(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null || echo "Service URL not available")
+        echo "Service URL: $SERVICE_URL"
         
         # Simple health check attempt - avoiding variable assignment
-        echo "Checking service health..."
-        curl -s "$(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)')/health" || echo "Service not yet responding - may still be starting up"
+        if [ "$SERVICE_URL" != "Service URL not available" ]; then
+          echo "Checking service health..."
+          curl -s "$SERVICE_URL/health" || echo "Service not yet responding - may still be starting up"
+        else
+          echo "Skipping health check - service URL not available"
+        fi
         
         # Final deployment message
         echo "====================================="
