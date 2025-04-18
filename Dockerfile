@@ -98,10 +98,6 @@ RUN echo "from flask import Blueprint, render_template_string, redirect, url_for
     echo "    app.register_blueprint(direct_bp)" >> /app/direct_routes.py && \
     echo "    print('Direct routes registered successfully')" >> /app/direct_routes.py
 
-# Create template directory rather than copying templates that might not exist
-# The application will generate templates at runtime if needed
-RUN mkdir -p /app/templates
-
 # Create web blueprint URL prefix fixer - simplified approach
 RUN echo "#!/usr/bin/env python3" > /app/fix_blueprint.py && \
     echo "import os, sys, re" >> /app/fix_blueprint.py && \
@@ -157,11 +153,44 @@ RUN echo "import os, atexit" > /app/app_ready.py && \
     echo "" >> /app/app_ready.py && \
     echo "atexit.register(cleanup_app_ready)" >> /app/app_ready.py
 
-# Create startup script - simplified approach
-COPY scripts/start.sh /app/start.sh
-RUN chmod +x /app/start.sh
+# Create startup script directly in the Dockerfile
+RUN echo '#!/bin/bash' > /app/start.sh && \
+    echo 'set -e' >> /app/start.sh && \
+    echo 'exec > >(tee -a /app/logs/startup.log) 2>&1' >> /app/start.sh && \
+    echo 'echo "Starting application at $(date)"' >> /app/start.sh && \
+    echo 'mkdir -p /app/data/uploads' >> /app/start.sh && \
+    echo 'mkdir -p /app/data/database' >> /app/start.sh && \
+    echo 'mkdir -p /app/logs' >> /app/start.sh && \
+    echo 'mkdir -p /app/static/css' >> /app/start.sh && \
+    echo 'mkdir -p /app/static/js' >> /app/start.sh && \
+    echo 'mkdir -p /app/templates' >> /app/start.sh && \
+    echo 'if [ -f "/app/fix_blueprint.py" ]; then' >> /app/start.sh && \
+    echo '  python /app/fix_blueprint.py || echo "Warning: Could not fix blueprint"' >> /app/start.sh && \
+    echo 'fi' >> /app/start.sh && \
+    echo 'if [ "$GENERATE_TEMPLATES" = "true" ]; then' >> /app/start.sh && \
+    echo '  echo "Template generation is enabled"' >> /app/start.sh && \
+    echo 'fi' >> /app/start.sh && \
+    echo 'chmod -R 755 /app/data' >> /app/start.sh && \
+    echo 'chmod -R 755 /app/logs' >> /app/start.sh && \
+    echo 'if [ -f "/app/app_ready.py" ]; then' >> /app/start.sh && \
+    echo '  echo "Marking app as ready"' >> /app/start.sh && \
+    echo '  python -c "from app_ready import mark_app_ready; mark_app_ready()"' >> /app/start.sh && \
+    echo 'fi' >> /app/start.sh && \
+    echo 'WORKERS=${GUNICORN_WORKERS:-$(nproc 2>/dev/null || echo 1)}' >> /app/start.sh && \
+    echo 'TIMEOUT=${GUNICORN_TIMEOUT:-300}' >> /app/start.sh && \
+    echo 'echo "Starting Gunicorn with $WORKERS workers (timeout: ${TIMEOUT}s)"' >> /app/start.sh && \
+    echo 'exec gunicorn --workers=$WORKERS \\' >> /app/start.sh && \
+    echo '  --timeout=$TIMEOUT \\' >> /app/start.sh && \
+    echo '  --bind=0.0.0.0:$PORT \\' >> /app/start.sh && \
+    echo '  --access-logfile=- \\' >> /app/start.sh && \
+    echo '  --error-logfile=- \\' >> /app/start.sh && \
+    echo '  --log-level=info \\' >> /app/start.sh && \
+    echo '  --preload \\' >> /app/start.sh && \
+    echo '  --worker-tmp-dir=/dev/shm \\' >> /app/start.sh && \
+    echo '  "main:create_app()"' >> /app/start.sh && \
+    chmod +x /app/start.sh
 
-# Copy application code
+# Copy application code 
 COPY . .
 
 # Fix web blueprint URL prefix issue
