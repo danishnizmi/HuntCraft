@@ -1,6 +1,6 @@
 # Cloud Build configuration file for the Malware Detonation Platform
 steps:
-  # Set up permissions for Cloud Build service account
+  # Set up permissions for Cloud Build service account with fixed PROJECT_ID reference
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'setup-build-permissions'
     entrypoint: 'bash'
@@ -9,19 +9,19 @@ steps:
       - |
         echo "Setting up Cloud Build permissions..."
         
-        # Get the Cloud Build service account email
-        # Use $$ to escape $ in bash variables so Cloud Build doesn't try to substitute them
-        PROJECT_NUMBER=$$(gcloud projects describe $$PROJECT_ID --format='value(projectNumber)')
-        CLOUDBUILD_SA="$$PROJECT_NUMBER@cloudbuild.gserviceaccount.com"
+        # Get the Cloud Build service account email - Fixed PROJECT_ID reference
+        PROJECT_ID=$PROJECT_ID  # Explicitly assign the env var
+        PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+        CLOUDBUILD_SA="$PROJECT_NUMBER@cloudbuild.gserviceaccount.com"
         
         # Grant Artifact Registry permissions
-        gcloud projects add-iam-policy-binding $$PROJECT_ID \
-          --member="serviceAccount:$$CLOUDBUILD_SA" \
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:$CLOUDBUILD_SA" \
           --role="roles/artifactregistry.writer" > /dev/null 2>&1 || echo "Failed to grant Artifact Registry permissions"
         
         # Grant Storage Admin permissions (for Container Registry)
-        gcloud projects add-iam-policy-binding $$PROJECT_ID \
-          --member="serviceAccount:$$CLOUDBUILD_SA" \
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:$CLOUDBUILD_SA" \
           --role="roles/storage.admin" > /dev/null 2>&1 || echo "Failed to grant Storage permissions"
         
         echo "Cloud Build permissions setup complete"
@@ -114,7 +114,7 @@ steps:
     id: 'push-sha-image'
     args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA']
 
-  # Deploy to Cloud Run using cloudrun.yaml configuration
+  # Deploy to Cloud Run with improved YAML handling
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloud-run'
     entrypoint: 'bash'
@@ -129,14 +129,41 @@ steps:
           exit 1
         fi
         
-        # Process the cloudrun.yaml file with necessary substitutions and fix for fieldRef
-        cat cloudrun.yaml | \
-        sed "s/\$PROJECT_ID/$PROJECT_ID/g" | \
-        sed "s/\$COMMIT_SHA/$COMMIT_SHA/g" | \
-        # Fix the fieldRef in env var to use proper metadata.annotations format
-        sed "s/fieldRef:/value: \"${_REGION}\"/g" > processed_cloudrun.yaml
+        # Create a simplified version of the config file to avoid YAML parsing issues
+        cat > processed_cloudrun.yaml << EOF
+        apiVersion: serving.knative.dev/v1
+        kind: Service
+        metadata:
+          name: malware-detonation-platform
+        spec:
+          template:
+            metadata:
+              annotations:
+                autoscaling.knative.dev/maxScale: "5"
+                autoscaling.knative.dev/minScale: "1"
+                run.googleapis.com/cpu-throttling: "false"
+            spec:
+              serviceAccountName: malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com
+              containerConcurrency: 80
+              timeoutSeconds: 300
+              containers:
+              - image: gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA
+                resources:
+                  limits:
+                    cpu: "2"
+                    memory: "4Gi"
+                env:
+                - name: DEBUG
+                  value: "false"
+                - name: GCP_PROJECT_ID
+                  value: "$PROJECT_ID"
+                - name: GCP_REGION
+                  value: "${_REGION}"
+                - name: MAX_CONCURRENT_DETONATIONS
+                  value: "3"
+        EOF
         
-        echo "Substitutions applied to cloudrun.yaml"
+        echo "Simplified cloudrun.yaml created"
         
         # Deploy using the processed YAML file
         echo "Deploying service to Cloud Run..."
