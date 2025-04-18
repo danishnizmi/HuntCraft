@@ -7,7 +7,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 # Set up logger first
 logger = logging.getLogger(__name__)
 
-# CRITICAL FIX: Create blueprint with EMPTY url_prefix
+# Create blueprint with EMPTY url_prefix - CRITICAL FIX
 web_bp = Blueprint('web', __name__, url_prefix='')
 login_manager = LoginManager()
 
@@ -56,9 +56,8 @@ def init_app(app):
             generate_base_templates()
             
             # Let main.py handle the root route
-            logger.info("Web interface module using app root handler")
+            logger.info("Web interface module initialized successfully")
         
-        logger.info("Web interface module initialized successfully")
     except Exception as e:
         logger.error(f"Error in web interface module initialization: {e}")
         # Don't re-raise to allow app to start with limited functionality
@@ -235,7 +234,7 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# IMPORTANT: Keep the @web_bp.route('/') but let main.py's root handler take precedence
+# IMPORTANT: Root route handler properly decorated
 @web_bp.route('/')
 def index():
     """Home page"""
@@ -254,8 +253,12 @@ def index():
         # Try to create templates if they don't exist
         if not (base_exists and index_exists):
             logger.warning("Templates missing, attempting to recreate them")
-            from main import ensure_index_template
-            ensure_index_template(current_app)
+            try:
+                from main import ensure_index_template
+                ensure_index_template(current_app)
+            except ImportError:
+                # If main's ensure_index_template is unavailable, use local fallback
+                generate_base_templates()
             
             # Double check they were created
             base_exists = os.path.exists(os.path.join(template_dir, 'base.html'))
@@ -291,7 +294,7 @@ def index():
         error_details = traceback.format_exc()
         logger.error(f"Error rendering index page: {str(e)}\nTraceback: {error_details}")
         
-        # CRITICAL FIX: Fallback to a minimal response if template rendering fails
+        # Fallback to a minimal response if template rendering fails
         return f"""
         <!DOCTYPE html>
         <html>
@@ -420,8 +423,11 @@ def dashboard():
             malware_module = get_module('malware')
             if malware_module and hasattr(malware_module, 'get_datasets'):
                 datasets = malware_module.get_datasets()
+            elif malware_module and hasattr(malware_module, 'get_recent_samples'):
+                # Alternative function name
+                datasets = malware_module.get_recent_samples(5)
             else:
-                logger.warning("Malware module or get_datasets function not available")
+                logger.warning("Malware module or dataset functions not available")
         except Exception as e:
             logger.error(f"Error loading recent samples: {e}")
         
