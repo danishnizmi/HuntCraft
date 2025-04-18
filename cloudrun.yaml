@@ -2,28 +2,91 @@ apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
   name: malware-detonation-platform
+  annotations:
+    # Cloud Run developer annotations
+    run.googleapis.com/launch-stage: BETA
+    run.googleapis.com/description: "Malware analysis and detonation platform"
 spec:
   template:
     metadata:
       annotations:
+        # Autoscaling configuration
         autoscaling.knative.dev/maxScale: "5"
         autoscaling.knative.dev/minScale: "1"
-        run.googleapis.com/startup-probe-period-seconds: "60"
+        # Keep at least one instance warm for faster response
+        run.googleapis.com/cpu-throttling: "false"
+        
+        # Startup optimization
+        run.googleapis.com/startup-cpu-boost: "true"
+        # Increased startup timeout (3 minutes) for initialization
+        run.googleapis.com/startup-probe-period-seconds: "180"
+        run.googleapis.com/startup-probe-failure-threshold: "10"
+        
+        # Health check configuration
+        run.googleapis.com/cloudsql-instances: ""
+        run.googleapis.com/container-dependencies: ""
         run.googleapis.com/liveness-probe-period-seconds: "30"
+        
+        # VPC configuration - if using VPC connector
+        # run.googleapis.com/vpc-access-connector: "projects/${PROJECT_ID}/locations/${REGION}/connectors/vpc-connector"
+        # run.googleapis.com/vpc-access-egress: "private-ranges-only"
+        
+        # Client-side throttling
+        run.googleapis.com/client-name: "cloud-console"
+        
+        # Execute the query with a timeout
+        run.googleapis.com/execution-environment: "gen2"
+        run.googleapis.com/vpc-access-egress: "all-traffic"
     spec:
+      # Ensure service account exists with appropriate permissions
       serviceAccountName: malware-platform-sa@${PROJECT_ID}.iam.gserviceaccount.com
+      
+      # Secure container execution
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      
       containers:
       - image: gcr.io/${PROJECT_ID}/malware-detonation-platform:latest
+        # Resource allocation - increased memory for initialization and processing
         resources:
           limits:
             cpu: "2"
             memory: "4Gi"
           requests:
             cpu: "1" 
-            memory: "1Gi"
+            memory: "2Gi"
+        
+        # Environment variables
         env:
+          # Core configuration
           - name: DEBUG
             value: "false"
+          - name: APP_NAME
+            value: "Malware Detonation Platform"
+          - name: PORT
+            value: "8080"
+          
+          # Database configuration
+          - name: DATABASE_PATH
+            value: "/app/data/malware_platform.db"
+          - name: DB_POOL_SIZE
+            value: "5"
+          
+          # Upload configuration
+          - name: UPLOAD_FOLDER
+            value: "/app/data/uploads"
+          - name: MAX_UPLOAD_SIZE_MB
+            value: "100"
+          
+          # Startup optimization
+          - name: GENERATE_TEMPLATES
+            value: "false"
+          - name: INITIALIZE_GCP
+            value: "true"
+          - name: SKIP_DB_INIT
+            value: "false"
+          
+          # GCP configuration
           - name: GCP_PROJECT_ID
             value: "${PROJECT_ID}"
           - name: GCP_STORAGE_BUCKET
@@ -31,51 +94,101 @@ spec:
           - name: GCP_RESULTS_BUCKET
             value: "detonation-results-${PROJECT_ID}"
           - name: GCP_REGION
-            value: "us-central1"
+            value: "${REGION}"
           - name: GCP_ZONE
-            value: "us-central1-a"
+            value: "${REGION}-a"
+          
+          # VM configuration
           - name: VM_NETWORK
             value: "detonation-network"
           - name: VM_SUBNET
             value: "detonation-subnet"
-          - name: GENERATE_TEMPLATES
-            value: "false"
+          - name: VM_MACHINE_TYPE
+            value: "e2-medium"
+          
+          # Application configuration
+          - name: MAX_CONCURRENT_DETONATIONS
+            value: "3"
+          - name: DETONATION_TIMEOUT_MINUTES 
+            value: "60"
           - name: GUNICORN_WORKERS
             value: "1"
           - name: GUNICORN_TIMEOUT
             value: "300"
-          - name: DB_POOL_SIZE
-            value: "5"
-          - name: MAX_CONCURRENT_DETONATIONS
-            value: "3"
+          
+          # Security configuration
           - name: SECRET_KEY
+            # In production, use Secret Manager
             value: "production-secret-key-${PROJECT_ID}"
-          - name: DATABASE_PATH
-            value: "/app/data/malware_platform.db"
-          - name: MAX_UPLOAD_SIZE_MB
-            value: "100"
-          - name: APP_NAME
-            value: "Malware Detonation Platform"
+            # valueFrom:
+            #   secretKeyRef:
+            #     name: app-secret-key
+            #     key: latest
+          
+          # Feature flags
+          - name: ENABLE_ADVANCED_ANALYSIS
+            value: "true"
+          - name: ENABLE_DATA_EXPORT
+            value: "true"
+          - name: ENABLE_VISUALIZATION
+            value: "true"
+        
+        # Port configuration
         ports:
-          - containerPort: 8080
+          - name: http1
+            containerPort: 8080
+        
+        # Startup probe - more forgiving to allow for initialization
         startupProbe:
           httpGet:
             path: /health
             port: 8080
-          failureThreshold: 30
+            httpHeaders:
+              - name: Host
+                value: "startup-probe"
+          initialDelaySeconds: 5
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 18  # 3 minutes total with 10s period
+          successThreshold: 1
+        
+        # Liveness probe - ensures container is responsive
         livenessProbe:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 120
+            httpHeaders:
+              - name: Host
+                value: "liveness-probe"
+          initialDelaySeconds: 180  # Start checking after 3 minutes
           periodSeconds: 30
           timeoutSeconds: 4
           failureThreshold: 3
+          successThreshold: 1
+        
+        # Readiness probe - ensures application is ready to serve requests
         readinessProbe:
           httpGet:
             path: /health
             port: 8080
+            httpHeaders:
+              - name: Host
+                value: "readiness-probe"
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 4
+          failureThreshold: 3
+          successThreshold: 1
+  
+  # Traffic configuration
+  traffic:
+    - percent: 100
+      latestRevision: true
+
+  # Autoscaling settings
+  # Note: These settings are less preferred than the template annotations above
+  # Included for completeness but may be ignored by Cloud Run
+  template:
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
