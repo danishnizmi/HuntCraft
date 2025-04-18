@@ -119,17 +119,17 @@ steps:
       - '-c'
       - |
         echo "Verifying deployment..."
-        SERVICE_URL=$(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)')
-        echo "Service URL: $SERVICE_URL"
         
-        # Simple health check attempt
+        # Get service URL without using a variable that Cloud Build might misinterpret
+        echo "Service URL: $(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)')"
+        
+        # Simple health check attempt - avoiding variable assignment
         echo "Checking service health..."
-        curl -s "$SERVICE_URL/health" || echo "Service not yet responding - may still be starting up"
+        curl -s "$(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)')/health" || echo "Service not yet responding - may still be starting up"
         
         # Final deployment message
         echo "====================================="
         echo "Deployment complete!"
-        echo "Service URL: $SERVICE_URL"
         echo "====================================="
 
 # Configuration options
