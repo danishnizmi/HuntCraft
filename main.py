@@ -207,24 +207,55 @@ def ensure_index_template(app):
     Args:
         app: Flask application
     """
-    if not os.path.exists('templates/index.html'):
-        try:
-            os.makedirs('templates', exist_ok=True)
-            with open('templates/index.html', 'w') as f:
+    try:
+        template_dir = app.template_folder
+        
+        # Make sure the path is absolute
+        if not os.path.isabs(template_dir):
+            template_dir = os.path.join(app.root_path, template_dir)
+            
+        logger.info(f"Ensuring templates exist in directory: {template_dir}")
+        
+        # Ensure directories exist
+        os.makedirs(template_dir, exist_ok=True)
+        
+        # First ensure base.html exists
+        base_path = os.path.join(template_dir, 'base.html')
+        if not os.path.exists(base_path):
+            logger.info(f"Base template doesn't exist, creating it at: {base_path}")
+            with open(base_path, 'w') as f:
                 f.write("""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ app_name }}</title>
+    <title>{% block title %}{{ app_name }}{% endblock %}</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 40px; text-align: center; }
         h1 { color: #4a6fa5; }
         .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin-top: 20px; }
+        a { color: #4a6fa5; text-decoration: none; }
+        a:hover { text-decoration: underline; }
     </style>
+    {% block head %}{% endblock %}
 </head>
 <body>
-    <h1>{{ app_name }}</h1>
+    <h1>{% block header %}{{ app_name }}{% endblock %}</h1>
+    {% block content %}{% endblock %}
+</body>
+</html>""")
+            logger.info("Created base.html template")
+        
+        # Now create index.html
+        index_path = os.path.join(template_dir, 'index.html')
+        if not os.path.exists(index_path):
+            logger.info(f"Index template doesn't exist, creating it at: {index_path}")
+            with open(index_path, 'w') as f:
+                f.write("""{% extends 'base.html' %}
+
+{% block title %}{{ app_name }}{% endblock %}
+
+{% block content %}
     <div class="card">
         <p>The application is running. Use the links below to navigate:</p>
         <ul style="list-style:none; padding:0;">
@@ -233,11 +264,30 @@ def ensure_index_template(app):
             <li><a href="/viz">Visualizations</a></li>
         </ul>
     </div>
-</body>
-</html>""")
-            logger.info("Created minimal index.html template")
-        except Exception as e:
-            logger.error(f"Error creating index template: {str(e)}")
+{% endblock %}""")
+            logger.info("Created index.html template")
+            
+        # Verify templates are readable
+        try:
+            with open(base_path, 'r') as f:
+                base_content = f.read()
+                logger.info(f"Successfully verified base.html is readable ({len(base_content)} bytes)")
+                
+            with open(index_path, 'r') as f:
+                index_content = f.read()
+                logger.info(f"Successfully verified index.html is readable ({len(index_content)} bytes)")
+        except Exception as verify_error:
+            logger.error(f"Failed to verify templates are readable: {str(verify_error)}")
+            
+        # List all templates for debugging
+        try:
+            templates = os.listdir(template_dir)
+            logger.info(f"Templates directory contains: {templates}")
+        except Exception as list_error:
+            logger.error(f"Failed to list templates directory: {str(list_error)}")
+    except Exception as e:
+        logger.error(f"Error creating index template: {str(e)}")
+        # Continue execution to allow fallback templates
 
 def register_error_handlers(app):
     """Register Flask error handlers for common errors.
@@ -474,6 +524,9 @@ def create_app(test_config=None):
         # Set up essential directories
         setup_essential_directories(app)
         
+        # Ensure basic templates exist FIRST - before any module initialization
+        ensure_index_template(app)
+        
         # Register error handlers
         register_error_handlers(app)
         
@@ -491,7 +544,7 @@ def create_app(test_config=None):
                 logger.info("Database initialization complete")
         except Exception as e:
             logger.error(f"Error initializing database: {str(e)}")
-            raise
+            # Don't re-raise to allow app to start with limited functionality
         
         # Initialize all modules in a defined order
         # This ensures all blueprints are registered before handling requests
@@ -506,9 +559,6 @@ def create_app(test_config=None):
                     logger.error(f"Error initializing module {module_name}: {str(e)}")
                     if module_name == 'web':  # Only the web module failure should stop app startup
                         raise
-            
-            # Ensure basic templates exist
-            ensure_index_template(app)
             
             # Mark application as ready here
             try:
