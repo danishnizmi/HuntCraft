@@ -21,8 +21,9 @@ def init_app(app):
     """Initialize web interface module with Flask app"""
     # Register blueprint first to avoid initialization issues
     try:
-        # CRITICAL FIX: EXPLICIT empty url_prefix to ensure root routes work
-        app.register_blueprint(web_bp, url_prefix='')
+        # CRITICAL FIX: Explicitly set url_prefix to None (not '')
+        web_bp.url_prefix = None
+        app.register_blueprint(web_bp, url_prefix=None)
         logger.info("Web interface blueprint registered successfully with empty URL prefix")
     except Exception as e:
         logger.error(f"Failed to register web interface blueprint: {e}")
@@ -54,48 +55,13 @@ def init_app(app):
             # Generate templates
             generate_base_templates()
             
-            # Register direct root route on app as fallback
-            app.add_url_rule('/', 'direct_root', direct_root)
-            logger.info("Registered direct root route as fallback")
+            # Let main.py handle the root route
+            logger.info("Web interface module using app root handler")
         
         logger.info("Web interface module initialized successfully")
     except Exception as e:
         logger.error(f"Error in web interface module initialization: {e}")
         # Don't re-raise to allow app to start with limited functionality
-
-# Direct root fallback route - registered directly on the app
-def direct_root():
-    """Direct root route handler - fallback."""
-    logger.info("Direct root fallback handler called")
-    try:
-        return render_template('index.html')
-    except Exception as e:
-        # CRITICAL FIX: More reliable fallback that always works
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Malware Detonation Platform</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
-                h1 {{ color: #4a6fa5; }}
-                .links {{ margin-top: 20px; }}
-                .links a {{ display: inline-block; margin: 0 10px; color: #4a6fa5; text-decoration: none; }}
-                .links a:hover {{ text-decoration: underline; }}
-            </style>
-        </head>
-        <body>
-            <h1>Malware Detonation Platform</h1>
-            <p>Welcome to the Malware Detonation Platform.</p>
-            <div class="links">
-                <a href="/malware">Malware Analysis</a>
-                <a href="/detonation">Detonation Service</a>
-                <a href="/viz">Visualizations</a>
-                <a href="/diagnostic">System Diagnostics</a>
-            </div>
-        </body>
-        </html>
-        """
 
 def handle_server_error(e):
     """Handle 500 errors gracefully"""
@@ -269,7 +235,7 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# CRITICAL FIX: Use exact route path '/' to handle root URL
+# IMPORTANT: Keep the @web_bp.route('/') but let main.py's root handler take precedence
 @web_bp.route('/')
 def index():
     """Home page"""
@@ -290,10 +256,37 @@ def index():
             logger.warning("Templates missing, attempting to recreate them")
             from main import ensure_index_template
             ensure_index_template(current_app)
+            
+            # Double check they were created
+            base_exists = os.path.exists(os.path.join(template_dir, 'base.html'))
+            index_exists = os.path.exists(os.path.join(template_dir, 'index.html'))
+            
+            # If still not created, generate them directly
+            if not (base_exists and index_exists):
+                generate_base_templates()
+        
+        # Read the content to verify it's not empty/truncated
+        try:
+            with open(os.path.join(template_dir, 'base.html'), 'r') as f:
+                base_content = f.read()
+            with open(os.path.join(template_dir, 'index.html'), 'r') as f:
+                index_content = f.read()
+                
+            # Check for minimal content
+            if len(base_content) < 100 or len(index_content) < 100:
+                logger.warning(f"Templates exist but appear to be truncated: base.html ({len(base_content)} bytes), index.html ({len(index_content)} bytes)")
+                # Regenerate them
+                generate_base_templates()
+        except Exception as e:
+            logger.error(f"Error reading template files: {e}")
+            # Regenerate them if there's an error
+            generate_base_templates()
         
         # Render the template
         logger.info("Attempting to render index.html template")
-        return render_template('index.html')
+        response = render_template('index.html')
+        logger.info(f"Successfully rendered index.html (length: {len(response)})")
+        return response
     except Exception as e:
         error_details = traceback.format_exc()
         logger.error(f"Error rendering index page: {str(e)}\nTraceback: {error_details}")
@@ -613,6 +606,15 @@ def diagnostic():
             diagnostics['template_info']['files'] = templates
             diagnostics['template_info']['base_exists'] = 'base.html' in templates
             diagnostics['template_info']['index_exists'] = 'index.html' in templates
+            
+            # Check template sizes
+            if diagnostics['template_info']['base_exists']:
+                base_path = os.path.join(template_dir, 'base.html')
+                diagnostics['template_info']['base_size'] = os.path.getsize(base_path)
+            
+            if diagnostics['template_info']['index_exists']:
+                index_path = os.path.join(template_dir, 'index.html')
+                diagnostics['template_info']['index_size'] = os.path.getsize(index_path)
     except Exception as e:
         diagnostics['template_info']['error'] = str(e)
     
@@ -855,274 +857,6 @@ def generate_base_templates():
         </div>
     </div>
 </div>
-{% endblock %}""",
-        
-        'login.html': """{% extends 'base.html' %}
-
-{% block title %}Login - {{ app_name }}{% endblock %}
-
-{% block content %}
-<div class="row justify-content-center">
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h2 class="card-title text-center">Login</h2>
-            </div>
-            <div class="card-body">
-                {% if error %}
-                <div class="alert alert-danger">{{ error }}</div>
-                {% endif %}
-                
-                <form method="POST">
-                    <div class="mb-3">
-                        <label for="username" class="form-label">Username</label>
-                        <input type="text" class="form-control" id="username" name="username" required autofocus>
-                    </div>
-                    <div class="mb-3">
-                        <label for="password" class="form-label">Password</label>
-                        <input type="password" class="form-control" id="password" name="password" required>
-                    </div>
-                    <div class="mb-3 form-check">
-                        <input type="checkbox" class="form-check-input" id="remember" name="remember">
-                        <label class="form-check-label" for="remember">Remember me</label>
-                    </div>
-                    <div class="d-grid">
-                        <button type="submit" class="btn btn-primary">Login</button>
-                    </div>
-                </form>
-                
-                <div class="text-center mt-3">
-                    <p class="text-muted">Default credentials: <code>admin / admin123</code></p>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}""",
-
-        'error.html': """{% extends 'base.html' %}
-
-{% block title %}Error {{ error_code }} - {{ app_name }}{% endblock %}
-
-{% block content %}
-<div class="row justify-content-center mt-5">
-    <div class="col-md-8">
-        <div class="card text-center">
-            <div class="card-header bg-danger text-white">
-                <h2 class="card-title">Error {{ error_code }}</h2>
-            </div>
-            <div class="card-body">
-                <p class="display-1 text-danger"><i class="fas fa-exclamation-triangle"></i></p>
-                <h4>{{ error_message }}</h4>
-                <p class="text-muted">Please try again or contact your system administrator if the problem persists.</p>
-                
-                {% if error_details and config.get('DEBUG', False) %}
-                <div class="alert alert-secondary mt-4">
-                    <h5>Debug Details</h5>
-                    <pre class="text-start"><code>{{ error_details }}</code></pre>
-                </div>
-                {% endif %}
-                
-                <a href="/" class="btn btn-primary mt-3">Return to Home</a>
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}""",
-
-        'diagnostic.html': """{% extends 'base.html' %}
-
-{% block title %}Diagnostics - {{ app_name }}{% endblock %}
-
-{% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h1>System Diagnostics</h1>
-    <div>
-        <a href="{{ url_for('web.index') }}" class="btn btn-outline-secondary">
-            <i class="fas fa-arrow-left"></i> Back to Home
-        </a>
-    </div>
-</div>
-
-<div class="row">
-    <div class="col-md-6">
-        <div class="card mb-4">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Application Information</h5>
-            </div>
-            <div class="card-body">
-                <table class="table table-sm">
-                    <tr>
-                        <th width="30%">App Name:</th>
-                        <td>{{ diagnostics.app_info.app_name }}</td>
-                    </tr>
-                    <tr>
-                        <th>Debug Mode:</th>
-                        <td>{{ diagnostics.app_info.debug_mode }}</td>
-                    </tr>
-                    <tr>
-                        <th>Templates Path:</th>
-                        <td>{{ diagnostics.app_info.templates_path }}</td>
-                    </tr>
-                    <tr>
-                        <th>Static Path:</th>
-                        <td>{{ diagnostics.app_info.static_path }}</td>
-                    </tr>
-                </table>
-            </div>
-        </div>
-        
-        <div class="card mb-4">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Module Status</h5>
-            </div>
-            <div class="card-body">
-                {% if diagnostics.module_status.error is defined %}
-                    <div class="alert alert-danger">{{ diagnostics.module_status.error }}</div>
-                {% else %}
-                    <table class="table table-sm">
-                        {% for module_name, module_info in diagnostics.module_status.items() %}
-                            <tr>
-                                <th width="30%">{{ module_name }}:</th>
-                                <td>
-                                    {% if module_info.initialized %}
-                                        <span class="badge bg-success">Initialized</span>
-                                    {% else %}
-                                        <span class="badge bg-warning">Not Initialized</span>
-                                    {% endif %}
-                                    
-                                    {% if module_info.error %}
-                                        <span class="badge bg-danger">Error</span>
-                                        <p class="text-danger small mt-1">{{ module_info.error }}</p>
-                                    {% endif %}
-                                </td>
-                            </tr>
-                        {% endfor %}
-                    </table>
-                {% endif %}
-                
-                <div class="mt-3">
-                    <a href="{{ url_for('web.health') }}" class="btn btn-outline-primary btn-sm" target="_blank">
-                        <i class="fas fa-heartbeat"></i> Health Check API
-                    </a>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-6">
-        <div class="card mb-4">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Template Information</h5>
-            </div>
-            <div class="card-body">
-                {% if diagnostics.template_info.error is defined %}
-                    <div class="alert alert-danger">{{ diagnostics.template_info.error }}</div>
-                {% else %}
-                    <table class="table table-sm">
-                        <tr>
-                            <th width="30%">Templates Path:</th>
-                            <td>{{ diagnostics.template_info.path }}</td>
-                        </tr>
-                        <tr>
-                            <th>Directory Exists:</th>
-                            <td>{{ diagnostics.template_info.exists }}</td>
-                        </tr>
-                        <tr>
-                            <th>base.html Exists:</th>
-                            <td>{{ diagnostics.template_info.base_exists }}</td>
-                        </tr>
-                        <tr>
-                            <th>index.html Exists:</th>
-                            <td>{{ diagnostics.template_info.index_exists }}</td>
-                        </tr>
-                    </table>
-                    
-                    {% if diagnostics.template_info.files %}
-                        <h6 class="mt-3">Template Files:</h6>
-                        <div class="border p-2 rounded" style="max-height: 150px; overflow-y: auto;">
-                            <ul class="list-unstyled mb-0">
-                                {% for file in diagnostics.template_info.files %}
-                                    <li><i class="fas fa-file-code text-primary me-2"></i> {{ file }}</li>
-                                {% endfor %}
-                            </ul>
-                        </div>
-                    {% endif %}
-                {% endif %}
-                
-                <div class="d-grid gap-2 mt-3">
-                    <button class="btn btn-outline-primary" id="recreate-templates">
-                        <i class="fas fa-sync"></i> Recreate Basic Templates
-                    </button>
-                </div>
-            </div>
-        </div>
-        
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Route Information</h5>
-            </div>
-            <div class="card-body">
-                {% if diagnostics.route_info.error is defined %}
-                    <div class="alert alert-danger">{{ diagnostics.route_info.error }}</div>
-                {% elif diagnostics.route_info.routes is defined %}
-                    <h6>Route Count by Blueprint:</h6>
-                    <table class="table table-sm">
-                        {% for bp_name, count in diagnostics.route_info.blueprint_routes.items() %}
-                            <tr>
-                                <th width="50%">{{ bp_name }}:</th>
-                                <td>{{ count }} routes</td>
-                            </tr>
-                        {% endfor %}
-                    </table>
-                    
-                    <h6 class="mt-3">All Routes:</h6>
-                    <div class="border p-2 rounded" style="max-height: 200px; overflow-y: auto;">
-                        <table class="table table-sm table-hover">
-                            <thead>
-                                <tr>
-                                    <th>Path</th>
-                                    <th>Endpoint</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for route in diagnostics.route_info.routes %}
-                                    <tr>
-                                        <td>{{ route.path }}</td>
-                                        <td>{{ route.endpoint }}</td>
-                                    </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                {% else %}
-                    <div class="alert alert-warning">No route information available</div>
-                {% endif %}
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-    document.addEventListener('DOMContentLoaded', function() {
-        // Recreate templates button
-        document.getElementById('recreate-templates').addEventListener('click', function() {
-            if (confirm('Are you sure you want to recreate the basic templates?')) {
-                fetch('/recreate-templates', { method: 'POST' })
-                    .then(response => response.json())
-                    .then(data => {
-                        alert(data.message || 'Templates recreated. Refresh the page to see changes.');
-                        window.location.reload();
-                    })
-                    .catch(error => {
-                        alert('Error: ' + error);
-                    });
-            }
-        });
-    });
-</script>
 {% endblock %}"""
     }
     
@@ -1206,100 +940,35 @@ document.addEventListener('DOMContentLoaded', function() {
             })
             .catch(error => console.error('Health check error:', error));
     }, 30000);
-
-    // Handle any forms with AJAX submission
-    const ajaxForms = document.querySelectorAll('form[data-ajax="true"]');
-    if (ajaxForms) {
-        ajaxForms.forEach(form => {
-            form.addEventListener('submit', function(e) {
-                e.preventDefault();
-                
-                const formData = new FormData(form);
-                const submitBtn = form.querySelector('button[type="submit"]');
-                const originalBtnText = submitBtn.innerHTML;
-                
-                // Disable button and show loading state
-                if (submitBtn) {
-                    submitBtn.disabled = true;
-                    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Processing...';
-                }
-                
-                // Send form data with fetch API
-                fetch(form.action, {
-                    method: form.method,
-                    body: formData,
-                    headers: {
-                        'X-Requested-With': 'XMLHttpRequest'
-                    }
-                })
-                .then(response => response.json())
-                .then(data => {
-                    // Handle response
-                    if (data.success) {
-                        if (data.redirect) {
-                            window.location.href = data.redirect;
-                        } else if (data.message) {
-                            showAlert(data.message, 'success');
-                        }
-                    } else {
-                        showAlert(data.message || 'An error occurred', 'danger');
-                    }
-                })
-                .catch(error => {
-                    console.error('Error submitting form:', error);
-                    showAlert('An unexpected error occurred. Please try again.', 'danger');
-                })
-                .finally(() => {
-                    // Reset button state
-                    if (submitBtn) {
-                        submitBtn.disabled = false;
-                        submitBtn.innerHTML = originalBtnText;
-                    }
-                });
-            });
-        });
-    }
-    
-    // Function to show alert messages
-    function showAlert(message, type = 'info') {
-        const alertsContainer = document.createElement('div');
-        alertsContainer.className = 'alert-container';
-        alertsContainer.style.position = 'fixed';
-        alertsContainer.style.top = '20px';
-        alertsContainer.style.right = '20px';
-        alertsContainer.style.zIndex = '9999';
-        
-        const alert = document.createElement('div');
-        alert.className = `alert alert-${type} alert-dismissible fade show`;
-        alert.innerHTML = `
-            ${message}
-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-        `;
-        
-        alertsContainer.appendChild(alert);
-        document.body.appendChild(alertsContainer);
-        
-        setTimeout(() => {
-            alert.classList.remove('show');
-            setTimeout(() => {
-                document.body.removeChild(alertsContainer);
-            }, 300);
-        }, 5000);
-    }
-});"""
+});
+"""
     }
     
     try:
         # Create templates directory
         os.makedirs('templates', exist_ok=True)
         
-        # Generate templates if they don't exist
+        # Generate templates if they don't exist or are too small
         for template_name, template_content in templates_to_generate.items():
             template_path = f'templates/{template_name}'
+            needs_create = False
+            
             if not os.path.exists(template_path):
+                needs_create = True
+            else:
+                # Check if template is too small
+                try:
+                    with open(template_path, 'r') as f:
+                        content = f.read()
+                    if len(content) < 100:  # Too small to be a proper template
+                        needs_create = True
+                except Exception:
+                    needs_create = True
+            
+            if needs_create:
                 with open(template_path, 'w') as f:
                     f.write(template_content)
-                logger.info(f"Created template: {template_name}")
+                logger.info(f"Created/recreated template: {template_name}")
         
         # Create static files directories
         os.makedirs('static/css', exist_ok=True)
