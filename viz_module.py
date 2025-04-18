@@ -8,7 +8,7 @@ from datetime import datetime
 # Set up logger first to capture import errors
 logger = logging.getLogger(__name__)
 
-# Create blueprint immediately
+# Create blueprint immediately - IMPORTANT: consistent with main.py root route fix
 viz_bp = Blueprint('viz', __name__, url_prefix='/viz')
 
 # Try to import visualization dependencies with better error handling
@@ -19,6 +19,7 @@ try:
     import pandas as pd
     import numpy as np
     BASIC_DEPS_AVAILABLE = True
+    logger.info("Basic visualization dependencies (pandas, numpy) are available")
 
     # Try to import plotly separately - we can still provide basic visualizations without it
     try:
@@ -60,6 +61,23 @@ def init_app(app):
             except:
                 return str(value)
         
+        # Add fallback route for root within this blueprint
+        @viz_bp.route('/')
+        def index():
+            return render_index()
+        
+        # Add health check route
+        @viz_bp.route('/health')
+        def health_check():
+            """Health check endpoint for the visualization module"""
+            return jsonify({
+                "status": "healthy" if BASIC_DEPS_AVAILABLE else "degraded",
+                "dependencies": {
+                    "basic": BASIC_DEPS_AVAILABLE,
+                    "full": VISUALIZATION_ENABLED
+                }
+            })
+        
         logger.info("Visualization module initialized successfully")
     except Exception as e:
         logger.error(f"Error in visualization module initialization: {e}")
@@ -88,55 +106,60 @@ def create_database_schema(cursor):
 def _db_connection(row_factory=None):
     """Create a database connection with optional row factory"""
     try:
-        from database import get_db_connection
-        return get_db_connection(row_factory)
-    except ImportError:
-        # Fallback if database.py is not available
+        # Try to use the global database connection function if available
         try:
+            from database import get_db_connection
+            return get_db_connection(row_factory)
+        except ImportError:
+            # Fallback if not available
             conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
             if row_factory:
                 conn.row_factory = row_factory
             return conn
-        except Exception as e:
-            logger.error(f"Database connection error: {e}")
-            raise
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise
 
 def execute_query(query, params=(), fetch_one=False, commit=False):
     """Execute a database query with unified error handling"""
     try:
-        from database import execute_query as db_execute_query
-        return db_execute_query(query, params, fetch_one, commit)
-    except ImportError:
-        # Fallback if database.py is not available
-        db = _db_connection()
-        cursor = db.cursor()
-        
+        # Try to use the global query function if available
         try:
-            cursor.execute(query, params)
+            from database import execute_query as db_execute_query
+            return db_execute_query(query, params, fetch_one, commit)
+        except ImportError:
+            # Fallback implementation
+            db = _db_connection()
+            cursor = db.cursor()
             
-            if fetch_one:
-                result = cursor.fetchone()
-            elif not commit:
-                result = cursor.fetchall()
-            else:
-                result = None
+            try:
+                cursor.execute(query, params)
                 
-            if commit:
-                db.commit()
-                
-            return result
-        except Exception as e:
-            if commit:
-                db.rollback()
-            logger.error(f"Error executing query: {str(e)}\nQuery: {query}\nParams: {params}")
-            raise
-        finally:
-            db.close()
+                if fetch_one:
+                    result = cursor.fetchone()
+                elif not commit:
+                    result = cursor.fetchall()
+                else:
+                    result = None
+                    
+                if commit:
+                    db.commit()
+                    
+                return result
+            except Exception as e:
+                if commit:
+                    db.rollback()
+                logger.error(f"Error executing query: {str(e)}\nQuery: {query}\nParams: {params}")
+                raise
+            finally:
+                db.close()
+    except Exception as e:
+        logger.error(f"Query execution error: {e}")
+        raise
 
-# Routes
-@viz_bp.route('/')
-def index():
-    """Visualization module main page"""
+# Main route handler with improved error handling
+def render_index():
+    """Render the visualization index page with proper error handling"""
     if not BASIC_DEPS_AVAILABLE and not VISUALIZATION_ENABLED:
         flash('Visualization is disabled due to missing dependencies. Please install pandas, numpy, and plotly.', 'warning')
         return render_template('visualization_disabled.html')
@@ -144,14 +167,41 @@ def index():
     try:
         visualizations = get_visualizations()
         return render_template('visualization_index.html', 
-                               visualizations=visualizations,
-                               viz_enabled=VISUALIZATION_ENABLED)
+                              visualizations=visualizations,
+                              viz_enabled=VISUALIZATION_ENABLED)
     except Exception as e:
         logger.error(f"Error in visualization index: {e}")
         flash(f"Error loading visualizations: {str(e)}", "error")
-        return render_template('visualization_index.html', 
-                               visualizations=[],
-                               viz_enabled=VISUALIZATION_ENABLED)
+        # Fallback to simpler HTML if template rendering fails
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Visualizations</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                h1 {{ color: #4a6fa5; }}
+                .alert {{ padding: 15px; background-color: #f8d7da; color: #721c24; margin-bottom: 20px; border-radius: 4px; }}
+                .btn {{ display: inline-block; padding: 6px 12px; background-color: #4a6fa5; color: white; 
+                text-decoration: none; border-radius: 4px; }}
+            </style>
+        </head>
+        <body>
+            <h1>Visualizations</h1>
+            <div class="alert">Error loading visualizations: {str(e)}</div>
+            <p>
+                <a href="/" class="btn">Return to Home</a>
+                <a href="/viz/create" class="btn">Create New Visualization</a>
+            </p>
+        </body>
+        </html>
+        """
+
+# Routes
+@viz_bp.route('/')
+def index():
+    """Visualization module main page"""
+    return render_index()
 
 @viz_bp.route('/create', methods=['GET', 'POST'])
 def create():
@@ -173,13 +223,18 @@ def create():
                 recent_results = malware_module.get_recent_samples(limit=10)
             else:
                 recent_results = []
+                logger.warning("Malware module or get_recent_samples function not available")
         except Exception as e:
             logger.error(f"Error importing malware module: {e}")
             recent_results = []
             
-        return render_template('visualization_select_data.html', 
-                               recent_results=recent_results,
-                               viz_enabled=VISUALIZATION_ENABLED)
+        try:
+            return render_template('visualization_select_data.html', 
+                                recent_results=recent_results,
+                                viz_enabled=VISUALIZATION_ENABLED)
+        except Exception as e:
+            flash(f"Error rendering template: {e}", "error")
+            return redirect(url_for('viz.index'))
     
     # Load result data
     try:
@@ -198,15 +253,20 @@ def create():
         flash('Error loading sample data', 'error')
         return redirect(url_for('viz.index'))
     
-    # Parse sample data and set defaults for visualization creation
+    # Extract columns for visualization options
     columns = []
     numeric_columns = []
+    sample_data = []
     
     try:
-        sample_data = []
         if 'analysis_results' in sample and sample['analysis_results']:
             try:
                 sample_data = json.loads(sample['analysis_results'])
+            except:
+                sample_data = [{'error': 'Invalid JSON data'}]
+        elif 'result_data' in sample and sample['result_data']:
+            try:
+                sample_data = json.loads(sample['result_data'])
             except:
                 sample_data = [{'error': 'Invalid JSON data'}]
         
@@ -234,15 +294,27 @@ def create():
                 logger.error(f"Error creating DataFrame: {e}")
                 # Fallback to simple column extraction if DataFrame creation fails
                 if isinstance(sample_data, list) and len(sample_data) > 0:
-                    columns = list(sample_data[0].keys())
+                    if isinstance(sample_data[0], dict):
+                        columns = list(sample_data[0].keys())
+                    else:
+                        columns = ["value"]
                 elif isinstance(sample_data, dict):
                     columns = list(sample_data.keys())
+                else:
+                    columns = []
+                numeric_columns = []
         else:
-            # Without pandas, try basic extraction of columns
+            # Basic extraction of columns without pandas
             if isinstance(sample_data, list) and len(sample_data) > 0:
-                columns = list(sample_data[0].keys())
+                if isinstance(sample_data[0], dict):
+                    columns = list(sample_data[0].keys())
+                else:
+                    columns = ["value"]
             elif isinstance(sample_data, dict):
                 columns = list(sample_data.keys())
+            else:
+                columns = []
+            numeric_columns = []
     except Exception as e:
         logger.error(f"Error parsing sample data: {e}")
         columns = []
@@ -283,14 +355,19 @@ def create():
             flash(f'Error creating visualization: {str(e)}', 'error')
     
     # GET request - show create form
-    return render_template('visualization_create.html', 
-                           result_id=result_id,
-                           default_name=default_name,
-                           columns=columns,
-                           numeric_columns=numeric_columns,
-                           viz_enabled=VISUALIZATION_ENABLED,
-                           basic_deps=BASIC_DEPS_AVAILABLE,
-                           sample=sample)
+    try:
+        return render_template('visualization_create.html', 
+                             result_id=result_id,
+                             default_name=default_name,
+                             columns=columns,
+                             numeric_columns=numeric_columns,
+                             viz_enabled=VISUALIZATION_ENABLED,
+                             basic_deps=BASIC_DEPS_AVAILABLE,
+                             sample=sample)
+    except Exception as e:
+        logger.error(f"Error rendering creation form: {e}")
+        flash(f"Error loading visualization form: {str(e)}", "error")
+        return redirect(url_for('viz.index'))
 
 @viz_bp.route('/view/<int:viz_id>')
 def view(viz_id):
@@ -330,6 +407,11 @@ def view(viz_id):
                 sample_data = json.loads(sample['analysis_results'])
             except:
                 sample_data = [{'error': 'Invalid JSON data'}]
+        elif 'result_data' in sample and sample['result_data']:
+            try:
+                sample_data = json.loads(sample['result_data'])
+            except:
+                sample_data = [{'error': 'Invalid JSON data'}]
     except Exception as e:
         logger.error(f"Error parsing sample data: {e}")
         flash(f'Error parsing sample data: {str(e)}', 'error')
@@ -344,22 +426,51 @@ def view(viz_id):
             # Generate a basic fallback visualization with less interactivity
             fig = generate_basic_visualization(sample_data, visualization['config'])
             try:
-                plot_json = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
-            except:
                 plot_json = json.dumps(fig)
+            except:
+                plot_json = json.dumps({"data": [], "layout": {"title": "Error generating visualization"}})
         else:
-            plot_json = None
+            plot_json = json.dumps({"data": [], "layout": {"title": "Visualization dependencies not available"}})
     except Exception as e:
         logger.error(f"Error generating visualization: {e}")
         flash(f'Error generating visualization: {str(e)}', 'error')
-        plot_json = None
+        plot_json = json.dumps({"data": [], "layout": {"title": f"Error: {str(e)}"}})
     
-    return render_template('visualization_view.html', 
-                           visualization=visualization,
-                           plot_json=plot_json,
-                           viz_enabled=VISUALIZATION_ENABLED,
-                           basic_deps=BASIC_DEPS_AVAILABLE,
-                           sample=sample)
+    try:
+        return render_template('visualization_view.html', 
+                             visualization=visualization,
+                             plot_json=plot_json,
+                             viz_enabled=VISUALIZATION_ENABLED,
+                             basic_deps=BASIC_DEPS_AVAILABLE,
+                             sample=sample)
+    except Exception as e:
+        logger.error(f"Error rendering visualization view: {e}")
+        # If template rendering fails, return a basic HTML response
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Visualization</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                h1 {{ color: #4a6fa5; }}
+            </style>
+            <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+        </head>
+        <body>
+            <h1>{visualization.get('name', 'Visualization')}</h1>
+            <div id="visualization-container" style="height: 500px; width: 100%;"></div>
+            <p><a href="{url_for('viz.index')}">Back to Visualizations</a></p>
+            
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {{
+                    const data = {plot_json};
+                    Plotly.newPlot('visualization-container', data.data, data.layout);
+                }});
+            </script>
+        </body>
+        </html>
+        """
 
 @viz_bp.route('/delete/<int:viz_id>', methods=['POST'])
 def delete(viz_id):
@@ -440,113 +551,134 @@ def _get_viz_options(viz_type, form_data):
 
 # Visualization functions
 def generate_visualization(data, config):
-    """Generate a visualization based on the data and configuration - memory-optimized"""
+    """Generate a visualization based on the data and configuration"""
     if not VISUALIZATION_ENABLED:
         return generate_basic_visualization(data, config)
         
-    # Convert to DataFrame if needed
-    if isinstance(data, dict):
-        # Convert dict to DataFrame-friendly format
-        df_data = []
-        for key, value in data.items():
-            if isinstance(value, dict):
-                row = {'name': key}
-                row.update(value)
-                df_data.append(row)
+    try:
+        # Import visualization modules within the function for cleaner error handling
+        import pandas as pd
+        import numpy as np
+        import plotly.express as px
+        import plotly.graph_objects as go
+        
+        # Convert to DataFrame if needed
+        if isinstance(data, dict):
+            # Convert dict to DataFrame-friendly format
+            df_data = []
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    row = {'name': key}
+                    row.update(value)
+                    df_data.append(row)
+                else:
+                    df_data.append({'name': key, 'value': value})
+            df = pd.DataFrame(df_data)
+        elif isinstance(data, list):
+            # For large datasets, sample to reduce memory usage
+            if len(data) > 1000:
+                # Use systematic sampling instead of random
+                step = max(1, len(data) // 1000)
+                sampled_data = data[::step][:1000]
+                df = pd.DataFrame(sampled_data)
             else:
-                df_data.append({'name': key, 'value': value})
-        df = pd.DataFrame(df_data)
-    elif isinstance(data, list):
-        # For large datasets, sample to reduce memory usage
-        if len(data) > 1000:
-            import random
-            sampled_data = random.sample(data, 1000)
-            df = pd.DataFrame(sampled_data)
+                df = pd.DataFrame(data)
         else:
-            df = pd.DataFrame(data)
-    else:
-        df = pd.DataFrame([{'error': 'Invalid data format'}])
-    
-    # Get visualization parameters
-    viz_type = config.get('type', 'bar')
-    x_column = config.get('x_column')
-    y_column = config.get('y_column')
-    color_column = config.get('color_column')
-    title = config.get('title', 'Visualization')
-    additional_options = config.get('additional_options', {})
-    
-    # Check if the columns exist
-    if x_column not in df.columns:
-        return {"data": [], "layout": {"title": f"Error: Column '{x_column}' not found"}}
-    if y_column not in df.columns:
-        return {"data": [], "layout": {"title": f"Error: Column '{y_column}' not found"}}
-    if color_column and color_column not in df.columns:
-        color_column = None
-    
-    # Create the appropriate visualization
-    if viz_type == 'bar':
-        orientation = additional_options.get('orientation', 'v')
-        barmode = additional_options.get('barmode', 'group')
+            return {"data": [], "layout": {"title": "Error: Unsupported data format"}}
         
-        if orientation == 'h':
-            fig = px.bar(df, y=x_column, x=y_column, color=color_column, 
-                         title=title, orientation='h', barmode=barmode)
-        else:
-            fig = px.bar(df, x=x_column, y=y_column, color=color_column, 
-                         title=title, barmode=barmode)
+        # Get visualization parameters
+        viz_type = config.get('type', 'bar')
+        x_column = config.get('x_column')
+        y_column = config.get('y_column')
+        color_column = config.get('color_column')
+        title = config.get('title', 'Visualization')
+        additional_options = config.get('additional_options', {})
+        
+        # Check if the columns exist
+        if x_column not in df.columns:
+            return {"data": [], "layout": {"title": f"Error: Column '{x_column}' not found"}}
+        if y_column not in df.columns:
+            return {"data": [], "layout": {"title": f"Error: Column '{y_column}' not found"}}
+        if color_column and color_column not in df.columns:
+            color_column = None
+        
+        # Create the appropriate visualization
+        if viz_type == 'bar':
+            orientation = additional_options.get('orientation', 'v')
+            barmode = additional_options.get('barmode', 'group')
             
-    elif viz_type == 'line':
-        line_shape = additional_options.get('line_shape', 'linear')
-        fig = px.line(df, x=x_column, y=y_column, color=color_column, 
-                      title=title, line_shape=line_shape)
-        
-    elif viz_type == 'scatter':
-        marker_size = additional_options.get('marker_size', 6)
-        trendline = additional_options.get('trendline', False)
-        
-        fig = px.scatter(df, x=x_column, y=y_column, color=color_column, 
-                         title=title, trendline='ols' if trendline else None)
-        fig.update_traces(marker=dict(size=marker_size))
-        
-    elif viz_type == 'pie':
-        hole = additional_options.get('hole', 0)
-        fig = px.pie(df, names=x_column, values=y_column, title=title, hole=hole)
-        
-    elif viz_type == 'histogram':
-        bins = additional_options.get('bins', 10)
-        fig = px.histogram(df, x=x_column, color=color_column, title=title, nbins=bins)
-        
-    elif viz_type == 'heatmap':
-        # For heatmap, we need to pivot the data
-        try:
-            # Limit the size of the pivot table
-            if len(df) > 500:
-                df = df.head(500)
-            pivot_df = df.pivot(index=x_column, columns=color_column, values=y_column)
-            fig = px.imshow(pivot_df, title=title)
-        except Exception as e:
-            logger.error(f"Error creating heatmap: {e}")
-            # If pivot fails, fallback to a correlation heatmap
+            if orientation == 'h':
+                fig = px.bar(df, y=x_column, x=y_column, color=color_column, 
+                             title=title, orientation='h', barmode=barmode)
+            else:
+                fig = px.bar(df, x=x_column, y=y_column, color=color_column, 
+                             title=title, barmode=barmode)
+                
+        elif viz_type == 'line':
+            line_shape = additional_options.get('line_shape', 'linear')
+            fig = px.line(df, x=x_column, y=y_column, color=color_column, 
+                          title=title, line_shape=line_shape)
+            
+        elif viz_type == 'scatter':
+            marker_size = additional_options.get('marker_size', 6)
+            trendline = additional_options.get('trendline', False)
+            
+            fig = px.scatter(df, x=x_column, y=y_column, color=color_column, 
+                             title=title, trendline='ols' if trendline else None)
+            fig.update_traces(marker=dict(size=marker_size))
+            
+        elif viz_type == 'pie':
+            hole = additional_options.get('hole', 0)
+            fig = px.pie(df, names=x_column, values=y_column, title=title, hole=hole)
+            
+        elif viz_type == 'histogram':
+            bins = additional_options.get('bins', 10)
+            fig = px.histogram(df, x=x_column, color=color_column, title=title, nbins=bins)
+            
+        elif viz_type == 'heatmap':
+            # For heatmap, we need to pivot the data
             try:
-                numeric_df = df.select_dtypes(include=[np.number])
-                fig = px.imshow(numeric_df.corr(), title=f"{title} (Correlation Matrix)")
+                # Limit the size of the pivot table for performance
+                if len(df) > 500:
+                    df = df.head(500)
+                pivot_df = df.pivot(index=x_column, columns=color_column, values=y_column)
+                fig = px.imshow(pivot_df, title=title)
             except Exception as e:
-                logger.error(f"Error creating correlation heatmap: {e}")
-                return {"data": [], "layout": {"title": f"Error creating heatmap: {str(e)}"}}
-    
-    else:
-        # Default to bar chart
-        fig = px.bar(df, x=x_column, y=y_column, color=color_column, title=title)
-    
-    # Add interactive features - but keep it lightweight
-    fig.update_layout(
-        margin=dict(l=40, r=40, t=50, b=40),
-        template='plotly_white',
-        hovermode='closest',
-        autosize=True
-    )
-    
-    return fig
+                logger.error(f"Error creating heatmap: {e}")
+                # If pivot fails, fallback to a correlation heatmap
+                try:
+                    numeric_df = df.select_dtypes(include=[np.number])
+                    fig = px.imshow(numeric_df.corr(), title=f"{title} (Correlation Matrix)")
+                except Exception as e2:
+                    logger.error(f"Error creating correlation heatmap: {e2}")
+                    return {"data": [], "layout": {"title": f"Error creating heatmap: {str(e)}"}}
+        
+        else:
+            # Default to bar chart
+            fig = px.bar(df, x=x_column, y=y_column, color=color_column, title=title)
+        
+        # Add interactive features but keep it lightweight
+        fig.update_layout(
+            margin=dict(l=40, r=40, t=50, b=40),
+            template='plotly_white',
+            hovermode='closest',
+            autosize=True
+        )
+        
+        return fig
+    except Exception as e:
+        logger.error(f"Error generating visualization: {e}")
+        return {
+            "data": [],
+            "layout": {
+                "title": f"Error generating visualization: {str(e)}",
+                "annotations": [{
+                    "text": str(e),
+                    "showarrow": False,
+                    "font": {"size": 14, "color": "red"}
+                }]
+            }
+        }
 
 def generate_basic_visualization(data, config):
     """Generate a basic visualization when Plotly is not available"""
@@ -566,21 +698,31 @@ def generate_basic_visualization(data, config):
     
     # Basic visualization using pandas without plotly
     try:
+        import pandas as pd
+        import numpy as np
+        
         # Convert to DataFrame if needed
         if isinstance(data, dict):
             df_data = []
-            for key, value in data.items():
-                if isinstance(value, dict):
-                    row = {'name': key}
-                    row.update(value)
-                    df_data.append(row)
-                else:
-                    df_data.append({'name': key, 'value': value})
-            df = pd.DataFrame(df_data)
+            if all(isinstance(v, (int, float, str, bool, type(None))) for v in data.values()):
+                # Simple dictionary with scalar values
+                df = pd.DataFrame([data])
+            else:
+                # Nested structure
+                for key, value in data.items():
+                    if isinstance(value, dict):
+                        row = {'name': key}
+                        row.update(value)
+                        df_data.append(row)
+                    else:
+                        df_data.append({'name': key, 'value': value})
+                df = pd.DataFrame(df_data)
         elif isinstance(data, list):
+            # Sample large datasets to avoid memory issues
             if len(data) > 1000:
-                import random
-                sampled_data = random.sample(data, 1000)
+                # Use systematic sampling
+                step = max(1, len(data) // 1000)
+                sampled_data = data[::step][:1000]
                 df = pd.DataFrame(sampled_data)
             else:
                 df = pd.DataFrame(data)
@@ -651,30 +793,35 @@ def generate_basic_visualization(data, config):
             }
         }
 
-# Database operations - consolidated and optimized
+# Database operations
 def create_visualization(name, description, viz_type, result_id, config):
     """Create a new visualization"""
-    conn = _db_connection()
-    cursor = conn.cursor()
-    
     try:
+        conn = _db_connection()
+        cursor = conn.cursor()
+        
+        # Ensure config is JSON serializable
+        if isinstance(config, dict):
+            config_json = json.dumps(config)
+        else:
+            config_json = config
+        
         cursor.execute(
             """
             INSERT INTO visualizations 
             (name, description, type, result_id, config, created_at)
             VALUES (?, ?, ?, ?, ?, datetime('now'))
             """,
-            (name, description, viz_type, result_id, json.dumps(config))
+            (name, description, viz_type, result_id, config_json)
         )
         
         viz_id = cursor.lastrowid
         conn.commit()
+        conn.close()
         return viz_id
     except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        conn.close()
+        logger.error(f"Error creating visualization: {e}")
+        raise
 
 def get_visualizations():
     """Get a list of visualizations with pagination for efficiency"""
@@ -842,7 +989,7 @@ def generate_js():
         }
     });
 
-    // Simple fallback visualization renderer
+    // Simple fallback visualization renderer for when Plotly is not available
     function renderFallbackVisualization(container, vizData) {
         if (!vizData || !vizData.data || !vizData.layout) {
             container.innerHTML = '<div class="viz-placeholder"><p>No visualization data available</p></div>';
@@ -914,7 +1061,16 @@ def generate_js():
 # Template generator
 def generate_templates():
     """Generate essential HTML templates for the visualization module"""
+    # Skip template generation if templates already exist
+    if os.path.exists('templates/visualization_index.html'):
+        return
+        
+    # Create templates directory
+    os.makedirs('templates', exist_ok=True)
+    
+    # Simplified templates
     templates = {
+        # Disabled visualization template
         'visualization_disabled.html': """
 {% extends 'base.html' %}
 
@@ -938,6 +1094,7 @@ def generate_templates():
 {% endblock %}
 """,
 
+        # Visualization index template
         'visualization_index.html': """
 {% extends 'base.html' %}
 
@@ -990,6 +1147,7 @@ def generate_templates():
 {% endblock %}
 """,
 
+        # Create visualization template
         'visualization_create.html': """
 {% extends 'base.html' %}
 
@@ -1186,6 +1344,7 @@ def generate_templates():
 {% endblock %}
 """,
 
+        # View visualization template
         'visualization_view.html': """
 {% extends 'base.html' %}
 
@@ -1254,7 +1413,7 @@ def generate_templates():
                 <p>{{ visualization.description }}</p>
                 <table class="table table-sm">
                     <tr>
-                        <th>Type:</th>
+                        <th width="30%">Type:</th>
                         <td>{{ visualization.type|title }} Chart</td>
                     </tr>
                     <tr>
@@ -1323,6 +1482,7 @@ def generate_templates():
 {% endblock %}
 """,
 
+        # Data selection for visualization
         'visualization_select_data.html': """
 {% extends 'base.html' %}
 
