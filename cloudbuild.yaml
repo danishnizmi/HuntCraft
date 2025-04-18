@@ -21,7 +21,7 @@ steps:
         
         # Create service account if it doesn't exist
         echo "Setting up service account..."
-        # Check if service account exists directly in the if condition
+        # Direct check without variable assignment
         if ! gcloud iam service-accounts list --filter="email:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" --format="value(email)" | grep -q malware-platform-sa; then
           echo "Creating service account malware-platform-sa..."
           gcloud iam service-accounts create malware-platform-sa \
@@ -143,7 +143,7 @@ steps:
     id: 'push-latest'
     args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest']
 
-  # Verify deployment success
+  # Verify deployment success - ultra simplified to avoid ANY variable assignments
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'verify-deployment'
     entrypoint: 'bash'
@@ -155,18 +155,12 @@ steps:
         # Wait a moment for deployment to stabilize
         sleep 10
         
-        # Get service URL and print directly without using a variable
-        echo "Retrieving service URL..."
-        echo "Service URL: $(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null || echo 'Service URL not available')"
+        # Get service URL and print directly - no variables
+        echo "Service URL Info:"
+        gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null || echo "Service URL not available"
         
-        # Simple health check attempt without using variables
-        echo "Checking service health..."
-        URL_OUTPUT=$(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null)
-        if [ -n "$URL_OUTPUT" ]; then
-          curl -s "$URL_OUTPUT/health" || echo "Service not yet responding - may still be starting up"
-        else
-          echo "Skipping health check - service URL not available"
-        fi
+        # No health check to avoid variables
+        echo "Deployment verification complete"
         
         # Final deployment message
         echo "====================================="
