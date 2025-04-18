@@ -10,17 +10,18 @@ steps:
         echo "Setting up Cloud Build permissions..."
         
         # Get the Cloud Build service account email
-        PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
-        CLOUDBUILD_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
+        # Use $$ to escape $ in bash variables so Cloud Build doesn't try to substitute them
+        PROJECT_NUMBER=$$(gcloud projects describe $$PROJECT_ID --format='value(projectNumber)')
+        CLOUDBUILD_SA="$$PROJECT_NUMBER@cloudbuild.gserviceaccount.com"
         
         # Grant Artifact Registry permissions
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:${CLOUDBUILD_SA}" \
+        gcloud projects add-iam-policy-binding $$PROJECT_ID \
+          --member="serviceAccount:$$CLOUDBUILD_SA" \
           --role="roles/artifactregistry.writer" > /dev/null 2>&1 || echo "Failed to grant Artifact Registry permissions"
         
         # Grant Storage Admin permissions (for Container Registry)
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:${CLOUDBUILD_SA}" \
+        gcloud projects add-iam-policy-binding $$PROJECT_ID \
+          --member="serviceAccount:$$CLOUDBUILD_SA" \
           --role="roles/storage.admin" > /dev/null 2>&1 || echo "Failed to grant Storage permissions"
         
         echo "Cloud Build permissions setup complete"
