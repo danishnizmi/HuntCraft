@@ -1,3 +1,4 @@
+# database.py - Modified to centralize database operations
 import sqlite3
 import os
 import logging
@@ -11,7 +12,7 @@ from contextlib import contextmanager
 logger = logging.getLogger(__name__)
 
 def get_db():
-    """Get database connection with row factory.
+    """Get database connection with row factory - central function for all modules.
     
     Returns:
         sqlite3.Connection: Database connection with row factory set
@@ -137,10 +138,7 @@ def execute_query(query, params=(), fetch_one=False, commit=False):
         raise
 
 def init_db():
-    """Initialize the database with schema from all modules.
-    
-    Creates all tables defined in module schema functions.
-    """
+    """Initialize the database with schema from all modules."""
     db = get_db()
     cursor = db.cursor()
     
@@ -182,13 +180,11 @@ def init_db_command():
     init_db()
     click.echo('Database initialization complete.')
 
-@click.command('check-db')
-@with_appcontext
-def check_db_command():
-    """Check database integrity and connection (CLI command)."""
+def check_database_health():
+    """Check database health for monitoring."""
     try:
-        db = get_db()
-        cursor = db.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor()
         
         # Run integrity check
         cursor.execute("PRAGMA integrity_check")
@@ -198,25 +194,36 @@ def check_db_command():
         cursor.execute("PRAGMA foreign_key_check")
         fk_violations = cursor.fetchall()
         
-        # Get database statistics
-        cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table'")
-        table_count = cursor.fetchone()[0]
+        conn.close()
         
-        # Output results
-        click.echo(f"Database connection: SUCCESS")
-        click.echo(f"Integrity check: {integrity_result}")
-        click.echo(f"Foreign key violations: {len(fk_violations)}")
-        click.echo(f"Number of tables: {table_count}")
-        
-        # List tables
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-        tables = cursor.fetchall()
-        click.echo("Tables in database:")
-        for table in tables:
-            click.echo(f"  - {table[0]}")
-            
+        return {
+            "status": "healthy" if integrity_result == "ok" and not fk_violations else "degraded",
+            "integrity": integrity_result,
+            "foreign_key_violations": len(fk_violations) 
+        }
     except Exception as e:
-        click.echo(f"Database check failed: {str(e)}", err=True)
+        logger.error(f"Database health check failed: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+def ensure_db_directory_exists(app):
+    """Ensure database directory exists and is writeable."""
+    db_path = app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')
+    db_dir = os.path.dirname(db_path)
+    
+    try:
+        os.makedirs(db_dir, exist_ok=True)
+        logger.info(f"Ensured database directory exists: {db_dir}")
+        
+        # Verify directory is writeable
+        test_file = os.path.join(db_dir, '.write_test')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+    except Exception as e:
+        logger.error(f"Error ensuring database directory exists or is writeable: {str(e)}")
         raise
 
 def init_app(app):
@@ -283,68 +290,39 @@ def init_app(app):
                     except Exception as init_err:
                         logger.error(f"Error during database reinitialization: {str(init_err)}")
 
-def ensure_db_directory_exists(app):
-    """Ensure database directory exists and is writeable.
-    
-    Args:
-        app: Flask application
-    """
-    db_path = app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')
-    db_dir = os.path.dirname(db_path)
-    
+@click.command('check-db')
+@with_appcontext
+def check_db_command():
+    """Check database integrity and connection (CLI command)."""
     try:
-        os.makedirs(db_dir, exist_ok=True)
-        logger.info(f"Ensured database directory exists: {db_dir}")
+        db = get_db()
+        cursor = db.cursor()
         
-        # Verify directory is writeable
-        test_file = os.path.join(db_dir, '.write_test')
-        with open(test_file, 'w') as f:
-            f.write('test')
-        os.remove(test_file)
-    except Exception as e:
-        logger.error(f"Error ensuring database directory exists or is writeable: {str(e)}")
-        raise
-
-def get_table_count(table_name):
-    """Get the count of rows in a table.
-    
-    Args:
-        table_name (str): Name of the table
+        # Run integrity check
+        cursor.execute("PRAGMA integrity_check")
+        integrity_result = cursor.fetchone()[0]
         
-    Returns:
-        int: Number of rows in the table
-    """
-    try:
-        return execute_query(f"SELECT COUNT(*) FROM {table_name}", fetch_one=True)[0]
+        # Check foreign keys
+        cursor.execute("PRAGMA foreign_key_check")
+        fk_violations = cursor.fetchall()
+        
+        # Get database statistics
+        cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table'")
+        table_count = cursor.fetchone()[0]
+        
+        # Output results
+        click.echo(f"Database connection: SUCCESS")
+        click.echo(f"Integrity check: {integrity_result}")
+        click.echo(f"Foreign key violations: {len(fk_violations)}")
+        click.echo(f"Number of tables: {table_count}")
+        
+        # List tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables = cursor.fetchall()
+        click.echo("Tables in database:")
+        for table in tables:
+            click.echo(f"  - {table[0]}")
+            
     except Exception as e:
-        logger.error(f"Error getting count for table {table_name}: {str(e)}")
-        return 0
-
-def check_database_lock():
-    """Check if the database is locked.
-    
-    Returns:
-        bool: True if the database is locked, False otherwise
-    """
-    try:
-        with get_db_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE").close()
-            return False
-    except sqlite3.OperationalError as e:
-        if "database is locked" in str(e):
-            return True
+        click.echo(f"Database check failed: {str(e)}", err=True)
         raise
-    except Exception as e:
-        logger.error(f"Error checking database lock: {str(e)}")
-        raise
-
-def vacuum_database():
-    """Vacuum the database to optimize storage and performance."""
-    try:
-        with get_db_connection() as conn:
-            conn.execute("VACUUM")
-        logger.info("Database vacuum completed successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Error vacuuming database: {str(e)}")
-        return False
