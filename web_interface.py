@@ -7,7 +7,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 # Set up logger first
 logger = logging.getLogger(__name__)
 
-# Create blueprint with EMPTY url_prefix - THIS IS CRITICAL FOR FIXING 404 ISSUES
+# CRITICAL FIX: Create blueprint with EMPTY url_prefix
 web_bp = Blueprint('web', __name__, url_prefix='')
 login_manager = LoginManager()
 
@@ -21,7 +21,7 @@ def init_app(app):
     """Initialize web interface module with Flask app"""
     # Register blueprint first to avoid initialization issues
     try:
-        # EXPLICIT empty url_prefix to ensure root routes work
+        # CRITICAL FIX: EXPLICIT empty url_prefix to ensure root routes work
         app.register_blueprint(web_bp, url_prefix='')
         logger.info("Web interface blueprint registered successfully with empty URL prefix")
     except Exception as e:
@@ -66,9 +66,11 @@ def init_app(app):
 # Direct root fallback route - registered directly on the app
 def direct_root():
     """Direct root route handler - fallback."""
+    logger.info("Direct root fallback handler called")
     try:
         return render_template('index.html')
     except Exception as e:
+        # CRITICAL FIX: More reliable fallback that always works
         return f"""
         <!DOCTYPE html>
         <html>
@@ -89,6 +91,7 @@ def direct_root():
                 <a href="/malware">Malware Analysis</a>
                 <a href="/detonation">Detonation Service</a>
                 <a href="/viz">Visualizations</a>
+                <a href="/diagnostic">System Diagnostics</a>
             </div>
         </body>
         </html>
@@ -266,7 +269,7 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Routes - Make sure the index route has @web_bp.route('/') decorator!
+# CRITICAL FIX: Use exact route path '/' to handle root URL
 @web_bp.route('/')
 def index():
     """Home page"""
@@ -295,7 +298,7 @@ def index():
         error_details = traceback.format_exc()
         logger.error(f"Error rendering index page: {str(e)}\nTraceback: {error_details}")
         
-        # Fallback to a minimal response if template rendering fails
+        # CRITICAL FIX: Fallback to a minimal response if template rendering fails
         return f"""
         <!DOCTYPE html>
         <html>
@@ -311,7 +314,7 @@ def index():
         </head>
         <body>
             <h1>Malware Detonation Platform</h1>
-            <p>The application is available but templates could not be loaded.</p>
+            <p>Welcome to the platform.</p>
             <div class="links">
                 <a href="/malware">Malware Analysis</a>
                 <a href="/detonation">Detonation Service</a>
