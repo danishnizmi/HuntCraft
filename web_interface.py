@@ -7,7 +7,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 # Set up logger first
 logger = logging.getLogger(__name__)
 
-# Create blueprint immediately
+# Create blueprint with EMPTY url_prefix
 web_bp = Blueprint('web', __name__, url_prefix='')
 login_manager = LoginManager()
 
@@ -21,8 +21,9 @@ def init_app(app):
     """Initialize web interface module with Flask app"""
     # Register blueprint first to avoid initialization issues
     try:
-        app.register_blueprint(web_bp)
-        logger.info("Web interface blueprint registered successfully")
+        # EXPLICIT empty url_prefix to ensure root routes work
+        app.register_blueprint(web_bp, url_prefix='')
+        logger.info("Web interface blueprint registered successfully with empty URL prefix")
     except Exception as e:
         logger.error(f"Failed to register web interface blueprint: {e}")
         raise
@@ -75,9 +76,32 @@ def handle_server_error(e):
 
 def handle_not_found(e):
     """Handle 404 errors gracefully"""
-    return render_template('error.html',
-                          error_code=404,
-                          error_message="The requested page was not found."), 404
+    logger.warning(f"404 error: {request.path} not found")
+    try:
+        return render_template('error.html',
+                            error_code=404,
+                            error_message="The requested page was not found."), 404
+    except Exception as template_error:
+        logger.error(f"Error rendering 404 template: {template_error}")
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Not Found</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+                h1 {{ color: #dc3545; }}
+                a {{ color: #4a6fa5; text-decoration: none; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <h1>404 - Page Not Found</h1>
+            <p>The requested URL {request.path} was not found on this server.</p>
+            <p><a href="/">Return to Home</a></p>
+        </body>
+        </html>
+        """, 404
 
 def handle_exception(e):
     """Handle uncaught exceptions"""
@@ -211,6 +235,7 @@ def admin_required(f):
 @web_bp.route('/')
 def index():
     """Home page"""
+    logger.info("Web blueprint index route handler called")
     try:
         # Check if templates exist
         template_dir = current_app.template_folder
@@ -256,7 +281,7 @@ def index():
                 <a href="/malware">Malware Analysis</a>
                 <a href="/detonation">Detonation Service</a>
                 <a href="/viz">Visualizations</a>
-                <a href="/health">Health Check</a>
+                <a href="/diagnostic">System Diagnostics</a>
             </div>
         </body>
         </html>
@@ -297,7 +322,50 @@ def login():
             logger.error(f"Login error: {e}")
             error = 'An error occurred during login. Please try again.'
     
-    return render_template('login.html', error=error)
+    try:
+        return render_template('login.html', error=error)
+    except Exception as e:
+        logger.error(f"Error rendering login template: {e}")
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Login - Malware Detonation Platform</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+                .login-form {{ max-width: 400px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }}
+                h1 {{ color: #4a6fa5; }}
+                input {{ width: 100%; padding: 8px; margin-bottom: 10px; }}
+                button {{ padding: 10px 15px; background-color: #4a6fa5; color: white; border: none; cursor: pointer; }}
+                .error {{ color: #dc3545; margin-bottom: 15px; }}
+            </style>
+        </head>
+        <body>
+            <h1>Malware Detonation Platform</h1>
+            <div class="login-form">
+                <h2>Login</h2>
+                {{% if error %}}
+                <div class="error">{{ error }}</div>
+                {{% endif %}}
+                <form method="POST">
+                    <div>
+                        <input type="text" id="username" name="username" placeholder="Username" required>
+                    </div>
+                    <div>
+                        <input type="password" id="password" name="password" placeholder="Password" required>
+                    </div>
+                    <div>
+                        <label>
+                            <input type="checkbox" name="remember"> Remember me
+                        </label>
+                    </div>
+                    <button type="submit">Login</button>
+                </form>
+                <p><small>Default credentials: admin / admin123</small></p>
+            </div>
+        </body>
+        </html>
+        """
 
 @web_bp.route('/logout')
 @login_required
@@ -350,16 +418,24 @@ def dashboard():
     except Exception as e:
         logger.error(f"Dashboard data loading error: {e}")
     
-    return render_template('dashboard.html', 
-                         datasets=datasets, 
-                         analyses=analyses,
-                         visualizations=visualizations)
+    try:
+        return render_template('dashboard.html', 
+                            datasets=datasets, 
+                            analyses=analyses,
+                            visualizations=visualizations)
+    except Exception as e:
+        logger.error(f"Error rendering dashboard template: {e}")
+        return redirect(url_for('web.index'))
 
 @web_bp.route('/profile')
 @login_required
 def profile():
     """User profile page"""
-    return render_template('profile.html')
+    try:
+        return render_template('profile.html')
+    except Exception as e:
+        logger.error(f"Error rendering profile template: {e}")
+        return redirect(url_for('web.dashboard'))
 
 @web_bp.route('/users')
 @login_required
@@ -377,7 +453,11 @@ def users():
         users_list = []
         flash("Error loading users", "danger")
     
-    return render_template('users.html', users=users_list)
+    try:
+        return render_template('users.html', users=users_list)
+    except Exception as e:
+        logger.error(f"Error rendering users template: {e}")
+        return redirect(url_for('web.dashboard'))
 
 @web_bp.route('/users/add', methods=['GET', 'POST'])
 @login_required
@@ -416,7 +496,11 @@ def add_user():
             logger.error(f"Error creating user: {e}")
             flash(f'Error creating user', 'danger')
     
-    return render_template('user_form.html', user=None)
+    try:
+        return render_template('user_form.html', user=None)
+    except Exception as e:
+        logger.error(f"Error rendering user form template: {e}")
+        return redirect(url_for('web.users'))
 
 @web_bp.route('/infrastructure')
 @login_required
@@ -453,7 +537,8 @@ def infrastructure():
 @web_bp.route('/health')
 def health_check():
     """Health check endpoint"""
-    return jsonify({"status": "healthy"}), 200
+    logger.info("Health check endpoint called on web blueprint")
+    return jsonify({"status": "healthy", "source": "web_blueprint"}), 200
 
 @web_bp.route('/diagnostic')
 def diagnostic():
@@ -467,7 +552,8 @@ def diagnostic():
         },
         'module_status': {},
         'template_info': {},
-        'database_info': {}
+        'database_info': {},
+        'route_info': {}
     }
     
     # Check module status
@@ -517,7 +603,59 @@ def diagnostic():
     except Exception as e:
         diagnostics['database_info']['error'] = str(e)
     
-    return render_template('diagnostic.html', diagnostics=diagnostics)
+    # Get route info
+    try:
+        routes = []
+        for rule in current_app.url_map.iter_rules():
+            routes.append({
+                'endpoint': rule.endpoint,
+                'methods': list(rule.methods),
+                'path': str(rule)
+            })
+        diagnostics['route_info']['routes'] = routes
+        
+        # Count routes by blueprint
+        blueprint_routes = {}
+        for route in routes:
+            bp_name = route['endpoint'].split('.')[0] if '.' in route['endpoint'] else 'app'
+            if bp_name not in blueprint_routes:
+                blueprint_routes[bp_name] = 0
+            blueprint_routes[bp_name] += 1
+        
+        diagnostics['route_info']['blueprint_routes'] = blueprint_routes
+    except Exception as e:
+        diagnostics['route_info']['error'] = str(e)
+    
+    try:
+        return render_template('diagnostic.html', diagnostics=diagnostics)
+    except Exception as e:
+        logger.error(f"Error rendering diagnostic template: {e}")
+        # Return JSON response if template fails
+        return jsonify(diagnostics)
+
+@web_bp.route('/recreate-templates', methods=['POST'])
+def recreate_templates():
+    """Recreate basic templates endpoint"""
+    try:
+        from main import ensure_index_template
+        ensure_index_template(current_app)
+        generate_base_templates()
+        return jsonify({"success": True, "message": "Templates recreated successfully"})
+    except Exception as e:
+        logger.error(f"Error recreating templates: {e}")
+        return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
+
+@web_bp.route('/init-database', methods=['POST'])
+@login_required
+@admin_required
+def initialize_database():
+    """Initialize database endpoint"""
+    try:
+        init_db(current_app)
+        return jsonify({"success": True, "message": "Database initialized successfully"})
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
 
 # Template generation
 def generate_base_templates():
@@ -725,184 +863,6 @@ def generate_base_templates():
     </div>
 </div>
 {% endblock %}""",
-        
-        'dashboard.html': """{% extends 'base.html' %}
-
-{% block title %}Dashboard - {{ app_name }}{% endblock %}
-
-{% block content %}
-<h1 class="mb-4">Dashboard</h1>
-
-<div class="row mb-4">
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Platform Status</h5>
-            </div>
-            <div class="card-body">
-                <div class="row">
-                    <div class="col-sm-6">
-                        <div class="text-center p-3">
-                            <i class="fas fa-virus fa-3x mb-2 text-primary"></i>
-                            <h2 id="samples-count">{{ datasets|length }}</h2>
-                            <p class="text-muted">Malware Samples</p>
-                        </div>
-                    </div>
-                    <div class="col-sm-6">
-                        <div class="text-center p-3">
-                            <i class="fas fa-flask fa-3x mb-2 text-primary"></i>
-                            <h2 id="detonations-count">{{ analyses|length }}</h2>
-                            <p class="text-muted">Detonation Jobs</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Quick Actions</h5>
-            </div>
-            <div class="card-body">
-                <div class="row text-center">
-                    <div class="col-sm-4">
-                        <a href="{{ url_for('malware.upload') }}" class="btn btn-outline-primary btn-sm d-block mb-2">
-                            <i class="fas fa-upload"></i>
-                        </a>
-                        <small>Upload Sample</small>
-                    </div>
-                    <div class="col-sm-4">
-                        <a href="{{ url_for('detonation.index') }}" class="btn btn-outline-primary btn-sm d-block mb-2">
-                            <i class="fas fa-flask"></i>
-                        </a>
-                        <small>New Detonation</small>
-                    </div>
-                    <div class="col-sm-4">
-                        <a href="{{ url_for('viz.create') }}" class="btn btn-outline-primary btn-sm d-block mb-2">
-                            <i class="fas fa-chart-line"></i>
-                        </a>
-                        <small>New Visualization</small>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="row">
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Recent Malware Samples</h5>
-            </div>
-            <div class="card-body">
-                {% if datasets %}
-                    <div class="list-group">
-                    {% for dataset in datasets %}
-                        <a href="{{ url_for('malware.view', sample_id=dataset.id) }}" class="list-group-item list-group-item-action">
-                            <div class="d-flex w-100 justify-content-between">
-                                <h6 class="mb-1">{{ dataset.name }}</h6>
-                                <small>{{ dataset.created_at }}</small>
-                            </div>
-                            <small class="text-muted">SHA256: {{ dataset.sha256[:12] }}...</small>
-                        </a>
-                    {% endfor %}
-                    </div>
-                {% else %}
-                    <p class="text-muted text-center">No recent samples.</p>
-                {% endif %}
-                
-                <div class="text-center mt-3">
-                    <a href="{{ url_for('malware.index') }}" class="btn btn-sm btn-outline-primary">View All Samples</a>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Recent Detonation Jobs</h5>
-            </div>
-            <div class="card-body">
-                {% if analyses %}
-                    <div class="list-group">
-                    {% for analysis in analyses %}
-                        <a href="{{ url_for('detonation.view', job_id=analysis.id) }}" class="list-group-item list-group-item-action">
-                            <div class="d-flex w-100 justify-content-between">
-                                <h6 class="mb-1">Job #{{ analysis.id }}</h6>
-                                <small class="badge {% if analysis.status == 'completed' %}bg-success{% elif analysis.status == 'failed' %}bg-danger{% else %}bg-warning{% endif %}">
-                                    {{ analysis.status }}
-                                </small>
-                            </div>
-                            <small class="text-muted">Sample: {{ analysis.sample_name }}</small>
-                        </a>
-                    {% endfor %}
-                    </div>
-                {% else %}
-                    <p class="text-muted text-center">No recent detonation jobs.</p>
-                {% endif %}
-                
-                <div class="text-center mt-3">
-                    <a href="{{ url_for('detonation.index') }}" class="btn btn-sm btn-outline-primary">View All Jobs</a>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}""",
-
-        'profile.html': """{% extends 'base.html' %}
-
-{% block title %}User Profile - {{ app_name }}{% endblock %}
-
-{% block content %}
-<div class="row justify-content-center">
-    <div class="col-md-8">
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h2 class="card-title">User Profile</h2>
-            </div>
-            <div class="card-body">
-                <div class="row mb-4">
-                    <div class="col-md-3 text-center">
-                        <i class="fas fa-user-circle fa-5x text-primary"></i>
-                    </div>
-                    <div class="col-md-9">
-                        <h3>{{ current_user.username }}</h3>
-                        <p><strong>Role:</strong> {{ current_user.role }}</p>
-                        <p><strong>User ID:</strong> {{ current_user.id }}</p>
-                    </div>
-                </div>
-                
-                <h4>Change Password</h4>
-                <hr>
-                
-                <form method="POST" action="{{ url_for('web.profile') }}">
-                    <div class="mb-3">
-                        <label for="current_password" class="form-label">Current Password</label>
-                        <input type="password" class="form-control" id="current_password" name="current_password">
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label for="new_password" class="form-label">New Password</label>
-                        <input type="password" class="form-control" id="new_password" name="new_password">
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label for="confirm_password" class="form-label">Confirm New Password</label>
-                        <input type="password" class="form-control" id="confirm_password" name="confirm_password">
-                    </div>
-                    
-                    <button type="submit" class="btn btn-primary">Update Password</button>
-                </form>
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}""",
 
         'error.html': """{% extends 'base.html' %}
 
@@ -932,173 +892,6 @@ def generate_base_templates():
         </div>
     </div>
 </div>
-{% endblock %}""",
-
-        'infrastructure.html': """{% extends 'base.html' %}
-
-{% block title %}Infrastructure - {{ app_name }}{% endblock %}
-
-{% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h1>Infrastructure Management</h1>
-    <div>
-        <a href="{{ url_for('web.dashboard') }}" class="btn btn-outline-secondary">
-            <i class="fas fa-arrow-left"></i> Back to Dashboard
-        </a>
-    </div>
-</div>
-
-<div class="row">
-    <div class="col-md-6">
-        <div class="card mb-4">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">GCP Configuration</h5>
-            </div>
-            <div class="card-body">
-                <table class="table table-sm">
-                    <tr>
-                        <th width="35%">Project ID:</th>
-                        <td>{{ project_id }}</td>
-                    </tr>
-                    <tr>
-                        <th>Region:</th>
-                        <td>{{ region }}</td>
-                    </tr>
-                    <tr>
-                        <th>Samples Bucket:</th>
-                        <td>{{ samples_bucket }}</td>
-                    </tr>
-                    <tr>
-                        <th>Results Bucket:</th>
-                        <td>{{ results_bucket }}</td>
-                    </tr>
-                </table>
-                
-                <div class="d-grid gap-2 mt-3">
-                    <button class="btn btn-outline-primary" onclick="checkGCPResources()">
-                        <i class="fas fa-check-circle"></i> Verify GCP Resources
-                    </button>
-                </div>
-            </div>
-        </div>
-        
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">System Health</h5>
-            </div>
-            <div class="card-body">
-                <div class="d-flex justify-content-between mb-3">
-                    <h6>Application Status:</h6>
-                    <span class="badge bg-success"><i class="fas fa-check"></i> Running</span>
-                </div>
-                
-                <div class="d-flex justify-content-between mb-3">
-                    <h6>Database Status:</h6>
-                    <span class="badge bg-success"><i class="fas fa-check"></i> Connected</span>
-                </div>
-                
-                <div class="d-flex justify-content-between mb-3">
-                    <h6>Storage Status:</h6>
-                    <span class="badge bg-success"><i class="fas fa-check"></i> Available</span>
-                </div>
-                
-                <div class="progress mt-3">
-                    <div class="progress-bar bg-success" role="progressbar" style="width: 25%;" aria-valuenow="25" aria-valuemin="0" aria-valuemax="100">25% Disk Usage</div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-6">
-        <div class="card mb-4">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Detonation VM Configuration</h5>
-            </div>
-            <div class="card-body">
-                <table class="table table-sm">
-                    <tr>
-                        <th width="35%">Network:</th>
-                        <td>{{ vm_network }}</td>
-                    </tr>
-                    <tr>
-                        <th>Subnet:</th>
-                        <td>{{ vm_subnet }}</td>
-                    </tr>
-                    <tr>
-                        <th>Machine Type:</th>
-                        <td>{{ vm_machine_type }}</td>
-                    </tr>
-                    <tr>
-                        <th>Auto-deletion:</th>
-                        <td><span class="badge bg-success">Enabled</span></td>
-                    </tr>
-                </table>
-                
-                <div class="alert alert-info mt-3">
-                    <i class="fas fa-info-circle"></i> VM templates are configured with automatic cleanup after detonation completes.
-                </div>
-                
-                <div class="d-grid gap-2 mt-3">
-                    <button class="btn btn-outline-primary" onclick="testVMDeployment()">
-                        <i class="fas fa-server"></i> Test VM Deployment
-                    </button>
-                </div>
-            </div>
-        </div>
-        
-        <div class="card">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">System Logs</h5>
-            </div>
-            <div class="card-body">
-                <div class="mb-3">
-                    <label for="log-level" class="form-label">Log Level</label>
-                    <select class="form-select" id="log-level">
-                        <option value="info">Info</option>
-                        <option value="warning">Warning</option>
-                        <option value="error">Error</option>
-                        <option value="debug">Debug</option>
-                    </select>
-                </div>
-                
-                <div class="log-container p-2 bg-dark text-light rounded" style="height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.8rem;">
-                    <div>[INFO] 2023-01-15 12:30:45 - Application started successfully</div>
-                    <div>[INFO] 2023-01-15 12:30:46 - Database connection established</div>
-                    <div>[INFO] 2023-01-15 12:31:02 - User 'admin' logged in</div>
-                    <div>[INFO] 2023-01-15 12:35:18 - New malware sample uploaded (SHA256: 8a9f...)</div>
-                    <div>[INFO] 2023-01-15 12:40:33 - Detonation job #12 created</div>
-                    <div>[INFO] 2023-01-15 12:40:35 - VM deployment initiated for job #12</div>
-                    <div>[INFO] 2023-01-15 12:45:22 - Detonation job #12 completed</div>
-                </div>
-                
-                <div class="d-grid gap-2 mt-3">
-                    <button class="btn btn-outline-primary" onclick="refreshLogs()">
-                        <i class="fas fa-sync"></i> Refresh Logs
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-    function checkGCPResources() {
-        alert('GCP resource verification initiated. This may take a moment...');
-        // In a real implementation, this would make an AJAX call to a backend endpoint
-    }
-    
-    function testVMDeployment() {
-        alert('VM deployment test initiated. This may take a few minutes...');
-        // In a real implementation, this would make an AJAX call to a backend endpoint
-    }
-    
-    function refreshLogs() {
-        alert('Refreshing logs...');
-        // In a real implementation, this would make an AJAX call to get the latest logs
-    }
-</script>
 {% endblock %}""",
 
         'diagnostic.html': """{% extends 'base.html' %}
@@ -1231,41 +1024,44 @@ def generate_base_templates():
         
         <div class="card">
             <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">Database Information</h5>
+                <h5 class="card-title mb-0">Route Information</h5>
             </div>
             <div class="card-body">
-                {% if diagnostics.database_info.error is defined %}
-                    <div class="alert alert-danger">{{ diagnostics.database_info.error }}</div>
-                {% else %}
+                {% if diagnostics.route_info.error is defined %}
+                    <div class="alert alert-danger">{{ diagnostics.route_info.error }}</div>
+                {% elif diagnostics.route_info.routes is defined %}
+                    <h6>Route Count by Blueprint:</h6>
                     <table class="table table-sm">
-                        <tr>
-                            <th width="30%">Database Path:</th>
-                            <td>{{ diagnostics.database_info.path }}</td>
-                        </tr>
-                        <tr>
-                            <th>Database Exists:</th>
-                            <td>{{ diagnostics.database_info.exists }}</td>
-                        </tr>
-                        {% if diagnostics.database_info.users_table_exists is defined %}
+                        {% for bp_name, count in diagnostics.route_info.blueprint_routes.items() %}
                             <tr>
-                                <th>Users Table:</th>
-                                <td>{{ diagnostics.database_info.users_table_exists }}</td>
+                                <th width="50%">{{ bp_name }}:</th>
+                                <td>{{ count }} routes</td>
                             </tr>
-                        {% endif %}
-                        {% if diagnostics.database_info.user_count is defined %}
-                            <tr>
-                                <th>User Count:</th>
-                                <td>{{ diagnostics.database_info.user_count }}</td>
-                            </tr>
-                        {% endif %}
+                        {% endfor %}
                     </table>
+                    
+                    <h6 class="mt-3">All Routes:</h6>
+                    <div class="border p-2 rounded" style="max-height: 200px; overflow-y: auto;">
+                        <table class="table table-sm table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Path</th>
+                                    <th>Endpoint</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for route in diagnostics.route_info.routes %}
+                                    <tr>
+                                        <td>{{ route.path }}</td>
+                                        <td>{{ route.endpoint }}</td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                {% else %}
+                    <div class="alert alert-warning">No route information available</div>
                 {% endif %}
-                
-                <div class="d-grid gap-2 mt-3">
-                    <button class="btn btn-outline-primary" id="init-database">
-                        <i class="fas fa-database"></i> Initialize Database
-                    </button>
-                </div>
             </div>
         </div>
     </div>
@@ -1282,21 +1078,6 @@ def generate_base_templates():
                     .then(response => response.json())
                     .then(data => {
                         alert(data.message || 'Templates recreated. Refresh the page to see changes.');
-                        window.location.reload();
-                    })
-                    .catch(error => {
-                        alert('Error: ' + error);
-                    });
-            }
-        });
-        
-        // Initialize database button
-        document.getElementById('init-database').addEventListener('click', function() {
-            if (confirm('Are you sure you want to initialize the database? This may reset existing data.')) {
-                fetch('/init-database', { method: 'POST' })
-                    .then(response => response.json())
-                    .then(data => {
-                        alert(data.message || 'Database initialized. Refresh the page to see changes.');
                         window.location.reload();
                     })
                     .catch(error => {
@@ -1478,8 +1259,9 @@ document.addEventListener('DOMContentLoaded', function() {
         
         # Generate templates if they don't exist
         for template_name, template_content in templates_to_generate.items():
-            if not os.path.exists(f'templates/{template_name}'):
-                with open(f'templates/{template_name}', 'w') as f:
+            template_path = f'templates/{template_name}'
+            if not os.path.exists(template_path):
+                with open(template_path, 'w') as f:
                     f.write(template_content)
                 logger.info(f"Created template: {template_name}")
         
@@ -1489,9 +1271,10 @@ document.addEventListener('DOMContentLoaded', function() {
         
         # Generate static files if they don't exist
         for filepath, content in static_files.items():
-            if not os.path.exists(f'static/{filepath}'):
-                os.makedirs(os.path.dirname(f'static/{filepath}'), exist_ok=True)
-                with open(f'static/{filepath}', 'w') as f:
+            full_path = f'static/{filepath}'
+            if not os.path.exists(full_path):
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                with open(full_path, 'w') as f:
                     f.write(content)
                 logger.info(f"Created static file: {filepath}")
                 
