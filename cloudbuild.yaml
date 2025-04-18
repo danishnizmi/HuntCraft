@@ -27,22 +27,33 @@ steps:
         
         # Ensure service account has required roles
         echo "Granting roles to service account..."
-        SA_EMAIL="malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
-        REQUIRED_ROLES=(
-          "roles/storage.admin"
-          "roles/pubsub.publisher"
-          "roles/pubsub.subscriber"
-          "roles/logging.logWriter"
-          "roles/run.admin"
-          "roles/compute.admin"
-          "roles/secretmanager.secretAccessor"
-        )
-        
-        for role in "${REQUIRED_ROLES[@]}"; do
-          gcloud projects add-iam-policy-binding $PROJECT_ID \
-            --member="serviceAccount:$SA_EMAIL" \
-            --role="$role" || echo "Role binding $role already exists or failed"
-        done
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/storage.admin" || echo "Role binding already exists"
+          
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/pubsub.publisher" || echo "Role binding already exists"
+          
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/pubsub.subscriber" || echo "Role binding already exists"
+          
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/logging.logWriter" || echo "Role binding already exists"
+          
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/run.admin" || echo "Role binding already exists"
+          
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/compute.admin" || echo "Role binding already exists"
+          
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/secretmanager.secretAccessor" || echo "Role binding already exists"
         
         echo "Infrastructure setup complete"
 
@@ -73,7 +84,6 @@ steps:
         fi
         
         # Process the cloudrun.yaml file to ensure $PROJECT_ID is properly substituted
-        # This handles cases where the YAML parser might not substitute all variables
         cat cloudrun.yaml | \
         sed "s/\$PROJECT_ID/$PROJECT_ID/g" | \
         sed "s/\$COMMIT_SHA/$COMMIT_SHA/g" > processed_cloudrun.yaml
