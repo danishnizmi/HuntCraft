@@ -1,4 +1,4 @@
-from flask import Flask, current_app, request, jsonify, g
+from flask import Flask, current_app, request, render_template, jsonify, g
 import os
 import sqlite3
 import logging
@@ -289,6 +289,103 @@ def ensure_index_template(app):
         logger.error(f"Error creating index template: {str(e)}")
         # Continue execution to allow fallback templates
 
+def register_app_routes(app):
+    """Register direct routes on the app for critical paths.
+    
+    Args:
+        app: Flask application
+    """
+    @app.route('/')
+    def root():
+        """Direct root route handler."""
+        logger.info("Direct app root route handler called")
+        try:
+            return render_template('index.html')
+        except Exception as e:
+            error_details = traceback.format_exc()
+            logger.error(f"Error rendering index from direct route: {e}\n{error_details}")
+            
+            # Return a simple HTML response
+            return f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Malware Detonation Platform</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+                    h1 {{ color: #4a6fa5; }}
+                    .links {{ margin-top: 20px; }}
+                    .links a {{ display: inline-block; margin: 0 10px; color: #4a6fa5; text-decoration: none; }}
+                    .links a:hover {{ text-decoration: underline; }}
+                </style>
+            </head>
+            <body>
+                <h1>Malware Detonation Platform</h1>
+                <p>Welcome to the Malware Detonation Platform.</p>
+                <div class="links">
+                    <a href="/malware">Malware Analysis</a>
+                    <a href="/detonation">Detonation Service</a>
+                    <a href="/viz">Visualizations</a>
+                    <a href="/diagnostic">System Diagnostics</a>
+                </div>
+            </body>
+            </html>
+            """
+    
+    @app.route('/diagnostic')
+    def app_diagnostic():
+        """Diagnostic info about the app."""
+        try:
+            # Get module info
+            module_info = {name: {'initialized': status.get('initialized', False)} 
+                          for name, status in module_status.items()}
+            
+            # Get template info
+            template_dir = app.template_folder
+            if not os.path.isabs(template_dir):
+                template_dir = os.path.join(app.root_path, template_dir)
+                
+            template_info = {
+                'path': template_dir,
+                'exists': os.path.exists(template_dir)
+            }
+            
+            if template_info['exists']:
+                template_info['files'] = os.listdir(template_dir)
+            
+            # Get blueprint info
+            blueprint_info = [{'name': bp.name, 'url_prefix': bp.url_prefix} 
+                             for bp in app.blueprints.values()]
+            
+            # Get route info
+            route_info = []
+            for rule in app.url_map.iter_rules():
+                route_info.append({
+                    'endpoint': rule.endpoint,
+                    'methods': list(rule.methods),
+                    'path': str(rule)
+                })
+            
+            # Prepare diagnostic data
+            diagnostic = {
+                'app_name': app.name,
+                'debug': app.debug,
+                'modules': module_info,
+                'blueprints': blueprint_info,
+                'templates': template_info,
+                'routes': route_info,
+                'time': datetime.now().isoformat()
+            }
+            
+            # Return as JSON
+            return jsonify(diagnostic)
+        except Exception as e:
+            logger.error(f"Error in diagnostic route: {e}")
+            return jsonify({
+                'error': str(e),
+                'traceback': traceback.format_exc()
+            }), 500
+
 def register_error_handlers(app):
     """Register Flask error handlers for common errors.
     
@@ -299,7 +396,9 @@ def register_error_handlers(app):
     def page_not_found(e):
         if request.path.startswith('/api/'):
             return jsonify({'error': 'Not Found', 'message': str(e)}), 404
-        return f"Page not found: {str(e)}", 404
+        return render_template('error.html', 
+                              error_code=404,
+                              error_message=f"Page not found: {str(e)}"), 404
 
     @app.errorhandler(500)
     def server_error(e):
@@ -312,7 +411,10 @@ def register_error_handlers(app):
                 'message': str(e),
                 'details': error_details if app.config.get('DEBUG', False) else None
             }), 500
-        return f"Server error: {str(e)}", 500
+        return render_template('error.html', 
+                              error_code=500,
+                              error_message=f"Server error: {str(e)}",
+                              error_details=error_details), 500
         
     @app.errorhandler(Exception)
     def handle_exception(e):
@@ -325,7 +427,10 @@ def register_error_handlers(app):
                 'message': str(e),
                 'details': error_details if app.config.get('DEBUG', False) else None
             }), 500
-        return f"An unexpected error occurred: {str(e)}", 500
+        return render_template('error.html', 
+                              error_code=500,
+                              error_message=f"An unexpected error occurred: {str(e)}",
+                              error_details=error_details), 500
 
 def register_health_routes(app):
     """Register health check and diagnostic endpoints.
@@ -458,6 +563,44 @@ def register_health_routes(app):
                 'timestamp': datetime.now().isoformat()
             }), 500
 
+def check_route_conflicts(app):
+    """Check for conflicting routes and report them in logs.
+    
+    Args:
+        app: Flask application
+    """
+    # Dictionary to track routes by path
+    routes_by_path = {}
+    
+    # Iterate through all routes
+    for rule in app.url_map.iter_rules():
+        path = str(rule)
+        
+        # Skip static file routes
+        if path.startswith('/static'):
+            continue
+            
+        # Track this route
+        if path not in routes_by_path:
+            routes_by_path[path] = []
+        routes_by_path[path].append(rule.endpoint)
+    
+    # Check for conflicts
+    conflicts = {path: endpoints for path, endpoints in routes_by_path.items() if len(endpoints) > 1}
+    
+    if conflicts:
+        logger.warning(f"Found {len(conflicts)} route conflicts:")
+        for path, endpoints in conflicts.items():
+            logger.warning(f"  Path '{path}' has multiple endpoints: {', '.join(endpoints)}")
+            logger.warning(f"  Flask will use: {endpoints[0]}")
+    else:
+        logger.info("No route conflicts found.")
+    
+    # Also log all routes for debugging
+    logger.info("Registered routes:")
+    for rule in sorted(app.url_map.iter_rules(), key=lambda x: str(x)):
+        logger.info(f"  {str(rule)} -> {rule.endpoint}")
+
 def request_middleware(app):
     """Configure middleware for request tracking.
     
@@ -527,6 +670,9 @@ def create_app(test_config=None):
         # Ensure basic templates exist FIRST - before any module initialization
         ensure_index_template(app)
         
+        # Register direct app routes (not through blueprints)
+        register_app_routes(app)
+        
         # Register error handlers
         register_error_handlers(app)
         
@@ -559,6 +705,9 @@ def create_app(test_config=None):
                     logger.error(f"Error initializing module {module_name}: {str(e)}")
                     if module_name == 'web':  # Only the web module failure should stop app startup
                         raise
+            
+            # Check for route conflicts
+            check_route_conflicts(app)
             
             # Mark application as ready here
             try:
