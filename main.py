@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, g, request
+from flask import Flask, render_template, jsonify, g, request, redirect, url_for
 import os
 import logging
 import importlib
@@ -44,6 +44,7 @@ def get_module(module_name):
 
 def direct_root_handler():
     """Direct root handler for fallback."""
+    logger.info("Direct root handler called")
     try:
         return render_template('index.html')
     except Exception as e:
@@ -56,8 +57,9 @@ def direct_root_handler():
             <style>
                 body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
                 h1 { color: #4a6fa5; }
-                .links a { display: inline-block; margin: 10px; padding: 8px 16px; color: white; 
-                          background-color: #4a6fa5; text-decoration: none; border-radius: 4px; }
+                .links { margin-top: 20px; }
+                .links a { display: inline-block; margin: 10px; padding: 8px 16px; 
+                          background-color: #4a6fa5; color: white; text-decoration: none; border-radius: 4px; }
             </style>
         </head>
         <body>
@@ -72,6 +74,35 @@ def direct_root_handler():
         </body>
         </html>
         """
+
+def handle_not_found(e):
+    """Handle 404 errors gracefully"""
+    logger.warning(f"404 error: {request.path} not found")
+    try:
+        return render_template('error.html', 
+                              error_code=404,
+                              error_message="The requested page was not found."), 404
+    except Exception as template_error:
+        logger.error(f"Error rendering 404 template: {template_error}")
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Not Found</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+                h1 {{ color: #dc3545; }}
+                a {{ color: #4a6fa5; text-decoration: none; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <h1>404 - Page Not Found</h1>
+            <p>The requested URL {request.path} was not found on this server.</p>
+            <p><a href="/">Return to Home</a></p>
+        </body>
+        </html>
+        """, 404
 
 def ensure_index_template(app):
     """Create a minimal index.html if it doesn't exist."""
@@ -106,6 +137,7 @@ def ensure_index_template(app):
     {% block content %}{% endblock %}
 </body>
 </html>""")
+        logger.info("Created base.html template")
     
     # Create index.html if it doesn't exist
     index_path = os.path.join(template_dir, 'index.html')
@@ -127,6 +159,7 @@ def ensure_index_template(app):
     </div>
 </div>
 {% endblock %}""")
+        logger.info("Created index.html template")
             
     # Create error.html if it doesn't exist
     error_path = os.path.join(template_dir, 'error.html')
@@ -144,6 +177,7 @@ def ensure_index_template(app):
     <a href="/">Return Home</a>
 </div>
 {% endblock %}""")
+        logger.info("Created error.html template")
 
 # Template generation utility (to be used by all modules)
 def generate_template(template_path, content, force=False):
@@ -325,6 +359,38 @@ def register_health_check(app):
         
         return jsonify(health_data)
 
+def fix_web_blueprint():
+    """Try to fix web blueprint URL prefix issues if the file exists."""
+    filepath = 'web_interface.py'  # Relative path within the app
+    if not os.path.exists(filepath):
+        logger.error(f'Web interface file {filepath} not found')
+        return False
+    
+    try:
+        with open(filepath, 'r') as f:
+            content = f.read()
+        
+        # Fix URL prefix using regular expression
+        import re
+        content = re.sub(
+            r"web_bp = Blueprint\('web', __name__(?:, url_prefix=[^)]*)?(?:\))", 
+            "web_bp = Blueprint('web', __name__, url_prefix='')", 
+            content
+        )
+        
+        # Ensure root route is properly defined
+        if 'def index():' in content and '@web_bp.route(\'/\')' not in content:
+            content = content.replace('def index():', '@web_bp.route(\'/\')\ndef index():')
+        
+        with open(filepath, 'w') as f:
+            f.write(content)
+        
+        logger.info(f'Successfully fixed web blueprint URL prefix in {filepath}')
+        return True
+    except Exception as e:
+        logger.error(f'Error fixing web blueprint: {e}')
+        return False
+
 def create_app(test_config=None):
     """Create and configure the Flask application with robust error handling and fallbacks."""
     # Record start time for uptime tracking
@@ -337,8 +403,9 @@ def create_app(test_config=None):
                     template_folder='templates')
         
         # Explicitly set the paths to avoid any path resolution issues
-        app.static_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
-        app.template_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+        app.root_path = os.path.dirname(os.path.abspath(__file__))
+        app.static_folder = os.path.join(app.root_path, 'static')
+        app.template_folder = os.path.join(app.root_path, 'templates')
         
         # Load configuration
         app.config.update({
@@ -356,6 +423,20 @@ def create_app(test_config=None):
         # Set MAX_CONTENT_LENGTH based on MAX_UPLOAD_SIZE_MB
         app.config['MAX_CONTENT_LENGTH'] = app.config['MAX_UPLOAD_SIZE_MB'] * 1024 * 1024
         
+        # Try to fix web blueprint URL prefix issues if needed
+        try:
+            fix_web_blueprint()
+        except Exception as e:
+            logger.warning(f"Failed to fix web blueprint: {e}")
+        
+        # CRITICAL: Register direct root route FIRST to ensure it exists
+        app.add_url_rule('/', 'direct_root', direct_root_handler)
+        logger.info("Direct root route registered as primary handler")
+        
+        # Register error handlers
+        app.register_error_handler(404, handle_not_found)
+        logger.info("Registered 404 error handler")
+        
         # Create required directories with better error handling
         setup_dirs = [
             os.path.dirname(app.config.get('DATABASE_PATH')),
@@ -371,9 +452,6 @@ def create_app(test_config=None):
                 logger.debug(f"Ensured directory exists: {directory}")
             except Exception as e:
                 logger.error(f"Error creating directory {directory}: {e}")
-        
-        # Register direct root handler as fallback
-        app.add_url_rule('/', 'direct_root', direct_root_handler)
         
         # Register consolidated health check endpoint
         register_health_check(app)
@@ -414,6 +492,7 @@ def create_app(test_config=None):
             # First register web blueprint directly for root route handling
             try:
                 from web_interface import web_bp
+                # CRITICAL: Register with empty URL prefix and ensure it takes precedence
                 app.register_blueprint(web_bp)
                 logger.info("Direct web blueprint registration successful")
             except Exception as e:
@@ -427,7 +506,7 @@ def create_app(test_config=None):
                     if module and hasattr(module, 'init_app'):
                         module.init_app(app)
                         module_status[module_name]['initialized'] = True
-                        logger.info(f"Module {module_name} initialized successfully")
+                        logger.info(f"Successfully initialized module: {module_name}")
                     else:
                         logger.warning(f"Module {module_name} has no init_app function or could not be imported")
                 except Exception as e:
@@ -435,15 +514,25 @@ def create_app(test_config=None):
                     module_status[module_name]['error'] = str(e)
                     logger.warning(f"Module {module_name} will not be available")
         
-        # Update the direct routes if available
-        try:
-            from direct_routes import register_direct_routes
-            register_direct_routes(app)
-            logger.info("Registered additional direct routes")
-        except ImportError:
-            logger.debug("Direct routes module not available - skipping registration")
-        except Exception as e:
-            logger.error(f"Error registering direct routes: {e}")
+        # Add a catch-all route to handle any unknown routes
+        @app.route('/<path:path>')
+        def catch_all(path):
+            logger.warning(f"Catch-all route handling unknown path: /{path}")
+            # First try to find a module that might handle this path
+            for prefix in ['malware', 'detonation', 'viz']:
+                if path.startswith(prefix):
+                    return redirect(f"/{path}")
+            
+            # If no module matches, show a 404 page
+            return handle_not_found(None)
+        
+        # ADDITIONAL PROTECTION: Add a permanent redirect for any potential variations of the root URL
+        @app.route('/index')
+        @app.route('/home')
+        @app.route('/start')
+        def redirect_to_root():
+            logger.info("Redirecting alternate root URLs to /")
+            return redirect(url_for('direct_root'))
         
         # Mark application as ready
         try:
