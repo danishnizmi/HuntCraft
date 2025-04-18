@@ -4,10 +4,12 @@ import sqlite3, json, os, datetime, logging, traceback
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 
-# Create blueprint and set up logging
+# Set up logger first
+logger = logging.getLogger(__name__)
+
+# Create blueprint immediately
 web_bp = Blueprint('web', __name__, url_prefix='')
 login_manager = LoginManager()
-logger = logging.getLogger(__name__)
 
 class User(UserMixin):
     def __init__(self, id, username, role):
@@ -17,32 +19,44 @@ class User(UserMixin):
 
 def init_app(app):
     """Initialize web interface module with Flask app"""
-    # Set up exception handling
-    app.errorhandler(500)(handle_server_error)
-    app.errorhandler(404)(handle_not_found)
-    app.errorhandler(Exception)(handle_exception)
+    # Register blueprint first to avoid initialization issues
+    try:
+        app.register_blueprint(web_bp)
+        logger.info("Web interface blueprint registered successfully")
+    except Exception as e:
+        logger.error(f"Failed to register web interface blueprint: {e}")
+        raise
     
-    # Register blueprint
-    app.register_blueprint(web_bp)
-    
-    # Setup login manager
-    login_manager.init_app(app)
-    login_manager.login_view = 'web.login'
-    
-    # Set up context processor for common template variables
-    app.context_processor(inject_template_variables)
-    
-    # Generate necessary templates and static files
-    with app.app_context():
-        # Ensure database directory exists
-        os.makedirs(os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')), exist_ok=True)
+    # Continue with other initialization in a safer way
+    try:
+        # Set up exception handling
+        app.errorhandler(500)(handle_server_error)
+        app.errorhandler(404)(handle_not_found)
+        app.errorhandler(Exception)(handle_exception)
         
-        # Ensure the database has been initialized
-        if not os.path.exists(app.config.get('DATABASE_PATH')):
-            init_db(app)
+        # Setup login manager
+        login_manager.init_app(app)
+        login_manager.login_view = 'web.login'
         
-        # Generate templates
-        generate_base_templates()
+        # Set up context processor for common template variables
+        app.context_processor(inject_template_variables)
+        
+        # Generate necessary templates and static files
+        with app.app_context():
+            # Ensure database directory exists
+            os.makedirs(os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')), exist_ok=True)
+            
+            # Ensure the database has been initialized
+            if not os.path.exists(app.config.get('DATABASE_PATH')):
+                init_db(app)
+            
+            # Generate templates
+            generate_base_templates()
+        
+        logger.info("Web interface module initialized successfully")
+    except Exception as e:
+        logger.error(f"Error in web interface module initialization: {e}")
+        # Don't re-raise to allow app to start with limited functionality
 
 def handle_server_error(e):
     """Handle 500 errors gracefully"""
@@ -148,23 +162,29 @@ def init_db(app):
 
 def create_database_schema(cursor):
     """Create database tables"""
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        role TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    # Create default admin user if no users exist
-    cursor.execute("SELECT COUNT(*) FROM users")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-            ("admin", generate_password_hash("admin123"), "admin")
-        )
-        logger.info("Created default admin user")
+    try:
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        # Create default admin user if no users exist
+        cursor.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute(
+                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                ("admin", generate_password_hash("admin123"), "admin")
+            )
+            logger.info("Created default admin user")
+        
+        logger.info("Web interface database schema created successfully")
+    except Exception as e:
+        logger.error(f"Error creating web interface database schema: {e}")
+        raise
 
 def _db_connection(row_factory=None):
     """Create a database connection with optional row factory"""
@@ -191,7 +211,28 @@ def admin_required(f):
 @web_bp.route('/')
 def index():
     """Home page"""
-    return render_template('index.html')
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        logger.error(f"Error rendering index page: {e}")
+        # Fallback to a minimal response if template rendering fails
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Malware Detonation Platform</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+                h1 {{ color: #4a6fa5; }}
+            </style>
+        </head>
+        <body>
+            <h1>Malware Detonation Platform</h1>
+            <p>The application is starting...</p>
+            <p><a href="/diagnostic">Diagnostics</a></p>
+        </body>
+        </html>
+        """
 
 @web_bp.route('/login', methods=['GET', 'POST'])
 def login():
@@ -250,20 +291,32 @@ def dashboard():
     try:
         # Safe import of modules using try/except
         try:
-            from malware_module import get_datasets
-            datasets = get_datasets()
+            from main import get_module
+            malware_module = get_module('malware')
+            if malware_module and hasattr(malware_module, 'get_datasets'):
+                datasets = malware_module.get_datasets()
+            else:
+                logger.warning("Malware module or get_datasets function not available")
         except Exception as e:
             logger.error(f"Error loading recent samples: {e}")
         
         try:
-            from detonation_module import get_detonation_jobs
-            analyses = get_detonation_jobs()[:5] if len(get_detonation_jobs()) > 0 else []
+            from main import get_module
+            detonation_module = get_module('detonation')
+            if detonation_module and hasattr(detonation_module, 'get_detonation_jobs'):
+                analyses = detonation_module.get_detonation_jobs()[:5] if hasattr(detonation_module.get_detonation_jobs(), '__len__') and len(detonation_module.get_detonation_jobs()) > 0 else []
+            else:
+                logger.warning("Detonation module or get_detonation_jobs function not available")
         except Exception as e:
             logger.error(f"Error loading detonation jobs: {e}")
         
         try:
-            from viz_module import get_visualizations_for_dashboard
-            visualizations = get_visualizations_for_dashboard()
+            from main import get_module
+            viz_module = get_module('viz')
+            if viz_module and hasattr(viz_module, 'get_visualizations_for_dashboard'):
+                visualizations = viz_module.get_visualizations_for_dashboard()
+            else:
+                logger.warning("Visualization module or get_visualizations_for_dashboard function not available")
         except Exception as e:
             logger.error(f"Error loading visualizations: {e}")
     except Exception as e:
@@ -519,6 +572,19 @@ def generate_base_templates():
                 <h5 class="card-title">Visualizations</h5>
                 <p class="card-text">Visualize data and create reports.</p>
                 <a href="{{ url_for('viz.index') }}" class="btn btn-outline-primary">View Analytics</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-wrench fa-2x mb-3 text-primary"></i>
+                <h5 class="card-title">Diagnostics</h5>
+                <p class="card-text">Check system status and troubleshoot issues.</p>
+                <a href="/diagnostic" class="btn btn-outline-primary">System Diagnostics</a>
             </div>
         </div>
     </div>
@@ -1133,4 +1199,3 @@ document.addEventListener('DOMContentLoaded', function() {
         logger.info("All templates and static files generated successfully")
     except Exception as e:
         logger.error(f"Error generating templates: {e}")
-        raise
