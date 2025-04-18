@@ -522,38 +522,6 @@ def register_health_check(app):
         
         return jsonify(health_data)
 
-def fix_web_blueprint():
-    """Try to fix web blueprint URL prefix issues if the file exists."""
-    filepath = 'web_interface.py'  # Relative path within the app
-    if not os.path.exists(filepath):
-        logger.error(f'Web interface file {filepath} not found')
-        return False
-    
-    try:
-        with open(filepath, 'r') as f:
-            content = f.read()
-        
-        # Fix URL prefix using regular expression
-        import re
-        content = re.sub(
-            r"web_bp = Blueprint\('web', __name__(?:, url_prefix=[^)]*)?(?:\))", 
-            "web_bp = Blueprint('web', __name__, url_prefix='')", 
-            content
-        )
-        
-        # Ensure root route is properly defined
-        if 'def index():' in content and '@web_bp.route(\'/\')' not in content:
-            content = content.replace('def index():', '@web_bp.route(\'/\')\ndef index():')
-        
-        with open(filepath, 'w') as f:
-            f.write(content)
-        
-        logger.info(f'Successfully fixed web blueprint URL prefix in {filepath}')
-        return True
-    except Exception as e:
-        logger.error(f'Error fixing web blueprint: {e}')
-        return False
-
 def create_app(test_config=None):
     """Create and configure the Flask application with robust error handling and fallbacks."""
     # Record start time for uptime tracking
@@ -586,11 +554,14 @@ def create_app(test_config=None):
         # Set MAX_CONTENT_LENGTH based on MAX_UPLOAD_SIZE_MB
         app.config['MAX_CONTENT_LENGTH'] = app.config['MAX_UPLOAD_SIZE_MB'] * 1024 * 1024
         
-        # Try to fix web blueprint URL prefix issues if needed
+        # Check web interface configuration
+        logger.info("Checking web interface configuration")
         try:
-            fix_web_blueprint()
+            # Just import and check if web_bp is defined correctly
+            from web_interface import web_bp
+            logger.info(f"Web blueprint configuration: url_prefix={web_bp.url_prefix}")
         except Exception as e:
-            logger.warning(f"Failed to fix web blueprint: {e}")
+            logger.warning(f"Could not check web blueprint configuration: {e}")
         
         # *** CRITICAL: REGISTER ROOT ROUTE FIRST AND DIRECTLY ON APP ***
         @app.route('/')
