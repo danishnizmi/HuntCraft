@@ -212,9 +212,29 @@ def admin_required(f):
 def index():
     """Home page"""
     try:
+        # Check if templates exist
+        template_dir = current_app.template_folder
+        if not os.path.isabs(template_dir):
+            template_dir = os.path.join(current_app.root_path, template_dir)
+            
+        base_exists = os.path.exists(os.path.join(template_dir, 'base.html'))
+        index_exists = os.path.exists(os.path.join(template_dir, 'index.html'))
+        
+        logger.info(f"Template directory: {template_dir}, base.html exists: {base_exists}, index.html exists: {index_exists}")
+        
+        # Try to create templates if they don't exist
+        if not (base_exists and index_exists):
+            logger.warning("Templates missing, attempting to recreate them")
+            from main import ensure_index_template
+            ensure_index_template(current_app)
+        
+        # Render the template
+        logger.info("Attempting to render index.html template")
         return render_template('index.html')
     except Exception as e:
-        logger.error(f"Error rendering index page: {e}")
+        error_details = traceback.format_exc()
+        logger.error(f"Error rendering index page: {str(e)}\nTraceback: {error_details}")
+        
         # Fallback to a minimal response if template rendering fails
         return f"""
         <!DOCTYPE html>
@@ -224,12 +244,20 @@ def index():
             <style>
                 body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
                 h1 {{ color: #4a6fa5; }}
+                .links {{ margin-top: 20px; }}
+                .links a {{ display: inline-block; margin: 0 10px; color: #4a6fa5; text-decoration: none; }}
+                .links a:hover {{ text-decoration: underline; }}
             </style>
         </head>
         <body>
             <h1>Malware Detonation Platform</h1>
-            <p>The application is starting...</p>
-            <p><a href="/diagnostic">Diagnostics</a></p>
+            <p>The application is available but templates could not be loaded.</p>
+            <div class="links">
+                <a href="/malware">Malware Analysis</a>
+                <a href="/detonation">Detonation Service</a>
+                <a href="/viz">Visualizations</a>
+                <a href="/health">Health Check</a>
+            </div>
         </body>
         </html>
         """
@@ -427,6 +455,70 @@ def health_check():
     """Health check endpoint"""
     return jsonify({"status": "healthy"}), 200
 
+@web_bp.route('/diagnostic')
+def diagnostic():
+    """Diagnostic page with system information"""
+    diagnostics = {
+        'app_info': {
+            'app_name': current_app.config.get('APP_NAME', 'Malware Detonation Platform'),
+            'debug_mode': current_app.config.get('DEBUG', False),
+            'templates_path': current_app.template_folder,
+            'static_path': current_app.static_folder,
+        },
+        'module_status': {},
+        'template_info': {},
+        'database_info': {}
+    }
+    
+    # Check module status
+    try:
+        from main import module_status
+        diagnostics['module_status'] = module_status
+    except ImportError:
+        diagnostics['module_status'] = {'error': 'Could not import module_status from main'}
+    
+    # Check template files
+    try:
+        template_dir = current_app.template_folder
+        if not os.path.isabs(template_dir):
+            template_dir = os.path.join(current_app.root_path, template_dir)
+        
+        diagnostics['template_info']['path'] = template_dir
+        diagnostics['template_info']['exists'] = os.path.exists(template_dir)
+        
+        if diagnostics['template_info']['exists']:
+            templates = os.listdir(template_dir)
+            diagnostics['template_info']['files'] = templates
+            diagnostics['template_info']['base_exists'] = 'base.html' in templates
+            diagnostics['template_info']['index_exists'] = 'index.html' in templates
+    except Exception as e:
+        diagnostics['template_info']['error'] = str(e)
+    
+    # Check database
+    try:
+        db_path = current_app.config.get('DATABASE_PATH')
+        diagnostics['database_info']['path'] = db_path
+        diagnostics['database_info']['exists'] = os.path.exists(db_path)
+        
+        if diagnostics['database_info']['exists']:
+            conn = _db_connection()
+            cursor = conn.cursor()
+            
+            # Check users table
+            cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='users'")
+            diagnostics['database_info']['users_table_exists'] = cursor.fetchone()[0] > 0
+            
+            # Check user count
+            if diagnostics['database_info']['users_table_exists']:
+                cursor.execute("SELECT COUNT(*) FROM users")
+                diagnostics['database_info']['user_count'] = cursor.fetchone()[0]
+            
+            conn.close()
+    except Exception as e:
+        diagnostics['database_info']['error'] = str(e)
+    
+    return render_template('diagnostic.html', diagnostics=diagnostics)
+
 # Template generation
 def generate_base_templates():
     """Generate essential HTML templates for the application"""
@@ -584,7 +676,7 @@ def generate_base_templates():
                 <i class="fas fa-wrench fa-2x mb-3 text-primary"></i>
                 <h5 class="card-title">Diagnostics</h5>
                 <p class="card-text">Check system status and troubleshoot issues.</p>
-                <a href="/diagnostic" class="btn btn-outline-primary">System Diagnostics</a>
+                <a href="{{ url_for('web.diagnostic') }}" class="btn btn-outline-primary">System Diagnostics</a>
             </div>
         </div>
     </div>
@@ -1006,6 +1098,213 @@ def generate_base_templates():
         alert('Refreshing logs...');
         // In a real implementation, this would make an AJAX call to get the latest logs
     }
+</script>
+{% endblock %}""",
+
+        'diagnostic.html': """{% extends 'base.html' %}
+
+{% block title %}Diagnostics - {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>System Diagnostics</h1>
+    <div>
+        <a href="{{ url_for('web.index') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left"></i> Back to Home
+        </a>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Application Information</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tr>
+                        <th width="30%">App Name:</th>
+                        <td>{{ diagnostics.app_info.app_name }}</td>
+                    </tr>
+                    <tr>
+                        <th>Debug Mode:</th>
+                        <td>{{ diagnostics.app_info.debug_mode }}</td>
+                    </tr>
+                    <tr>
+                        <th>Templates Path:</th>
+                        <td>{{ diagnostics.app_info.templates_path }}</td>
+                    </tr>
+                    <tr>
+                        <th>Static Path:</th>
+                        <td>{{ diagnostics.app_info.static_path }}</td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+        
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Module Status</h5>
+            </div>
+            <div class="card-body">
+                {% if diagnostics.module_status.error is defined %}
+                    <div class="alert alert-danger">{{ diagnostics.module_status.error }}</div>
+                {% else %}
+                    <table class="table table-sm">
+                        {% for module_name, module_info in diagnostics.module_status.items() %}
+                            <tr>
+                                <th width="30%">{{ module_name }}:</th>
+                                <td>
+                                    {% if module_info.initialized %}
+                                        <span class="badge bg-success">Initialized</span>
+                                    {% else %}
+                                        <span class="badge bg-warning">Not Initialized</span>
+                                    {% endif %}
+                                    
+                                    {% if module_info.error %}
+                                        <span class="badge bg-danger">Error</span>
+                                        <p class="text-danger small mt-1">{{ module_info.error }}</p>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </table>
+                {% endif %}
+                
+                <div class="mt-3">
+                    <a href="{{ url_for('web.health') }}" class="btn btn-outline-primary btn-sm" target="_blank">
+                        <i class="fas fa-heartbeat"></i> Health Check API
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Template Information</h5>
+            </div>
+            <div class="card-body">
+                {% if diagnostics.template_info.error is defined %}
+                    <div class="alert alert-danger">{{ diagnostics.template_info.error }}</div>
+                {% else %}
+                    <table class="table table-sm">
+                        <tr>
+                            <th width="30%">Templates Path:</th>
+                            <td>{{ diagnostics.template_info.path }}</td>
+                        </tr>
+                        <tr>
+                            <th>Directory Exists:</th>
+                            <td>{{ diagnostics.template_info.exists }}</td>
+                        </tr>
+                        <tr>
+                            <th>base.html Exists:</th>
+                            <td>{{ diagnostics.template_info.base_exists }}</td>
+                        </tr>
+                        <tr>
+                            <th>index.html Exists:</th>
+                            <td>{{ diagnostics.template_info.index_exists }}</td>
+                        </tr>
+                    </table>
+                    
+                    {% if diagnostics.template_info.files %}
+                        <h6 class="mt-3">Template Files:</h6>
+                        <div class="border p-2 rounded" style="max-height: 150px; overflow-y: auto;">
+                            <ul class="list-unstyled mb-0">
+                                {% for file in diagnostics.template_info.files %}
+                                    <li><i class="fas fa-file-code text-primary me-2"></i> {{ file }}</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    {% endif %}
+                {% endif %}
+                
+                <div class="d-grid gap-2 mt-3">
+                    <button class="btn btn-outline-primary" id="recreate-templates">
+                        <i class="fas fa-sync"></i> Recreate Basic Templates
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Database Information</h5>
+            </div>
+            <div class="card-body">
+                {% if diagnostics.database_info.error is defined %}
+                    <div class="alert alert-danger">{{ diagnostics.database_info.error }}</div>
+                {% else %}
+                    <table class="table table-sm">
+                        <tr>
+                            <th width="30%">Database Path:</th>
+                            <td>{{ diagnostics.database_info.path }}</td>
+                        </tr>
+                        <tr>
+                            <th>Database Exists:</th>
+                            <td>{{ diagnostics.database_info.exists }}</td>
+                        </tr>
+                        {% if diagnostics.database_info.users_table_exists is defined %}
+                            <tr>
+                                <th>Users Table:</th>
+                                <td>{{ diagnostics.database_info.users_table_exists }}</td>
+                            </tr>
+                        {% endif %}
+                        {% if diagnostics.database_info.user_count is defined %}
+                            <tr>
+                                <th>User Count:</th>
+                                <td>{{ diagnostics.database_info.user_count }}</td>
+                            </tr>
+                        {% endif %}
+                    </table>
+                {% endif %}
+                
+                <div class="d-grid gap-2 mt-3">
+                    <button class="btn btn-outline-primary" id="init-database">
+                        <i class="fas fa-database"></i> Initialize Database
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Recreate templates button
+        document.getElementById('recreate-templates').addEventListener('click', function() {
+            if (confirm('Are you sure you want to recreate the basic templates?')) {
+                fetch('/recreate-templates', { method: 'POST' })
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message || 'Templates recreated. Refresh the page to see changes.');
+                        window.location.reload();
+                    })
+                    .catch(error => {
+                        alert('Error: ' + error);
+                    });
+            }
+        });
+        
+        // Initialize database button
+        document.getElementById('init-database').addEventListener('click', function() {
+            if (confirm('Are you sure you want to initialize the database? This may reset existing data.')) {
+                fetch('/init-database', { method: 'POST' })
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message || 'Database initialized. Refresh the page to see changes.');
+                        window.location.reload();
+                    })
+                    .catch(error => {
+                        alert('Error: ' + error);
+                    });
+            }
+        });
+    });
 </script>
 {% endblock %}"""
     }
