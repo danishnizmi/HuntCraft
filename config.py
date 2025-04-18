@@ -1,6 +1,10 @@
 import os
+import logging
 from pathlib import Path
 from google.cloud import secretmanager
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 class Config:
     """Base configuration with GCP integration"""
@@ -13,9 +17,6 @@ class Config:
     # GCP settings
     GCP_REGION = os.environ.get('GCP_REGION', 'us-central1')
     GCP_ZONE = os.environ.get('GCP_ZONE', 'us-central1-a')
-    
-    # Secret values - Fixed to use direct environment variable
-    SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-12345")
     
     # Storage configuration
     if ON_CLOUD_RUN:
@@ -35,7 +36,10 @@ class Config:
     VM_SUBNET = os.environ.get('VM_SUBNET', 'detonation-subnet')
     VM_MACHINE_TYPE = os.environ.get('VM_MACHINE_TYPE', 'e2-medium')
     VM_IMAGE_FAMILY = os.environ.get('VM_IMAGE_FAMILY', 'detonation-vm')
-    VM_SERVICE_ACCOUNT = os.environ.get('VM_SERVICE_ACCOUNT', f"detonation-vm@{PROJECT_ID}.iam.gserviceaccount.com" if PROJECT_ID else "detonation-vm@example.com")
+    VM_SERVICE_ACCOUNT = os.environ.get(
+        'VM_SERVICE_ACCOUNT', 
+        f"detonation-vm@{PROJECT_ID}.iam.gserviceaccount.com" if PROJECT_ID else "detonation-vm@example.com"
+    )
     
     # Upload and feature limits
     MAX_UPLOAD_SIZE_MB = int(os.environ.get('MAX_UPLOAD_SIZE_MB', 100))
@@ -70,14 +74,55 @@ class Config:
             str: The secret value
         """
         if not secret_id:
-            return None  # Return None if no secret_id provided
+            logger.warning("No secret_id provided to get_secret")
+            return None
             
+        # First try to get from environment variables (safer for local dev)
+        env_value = os.environ.get(secret_id)
+        if env_value:
+            logger.debug(f"Using environment value for secret: {secret_id}")
+            return env_value
+            
+        # Next try Secret Manager if on Cloud Run
         if cls.ON_CLOUD_RUN and cls.PROJECT_ID:
             try:
+                logger.debug(f"Attempting to retrieve secret from Secret Manager: {secret_id}")
                 client = secretmanager.SecretManagerServiceClient()
                 name = f"projects/{cls.PROJECT_ID}/secrets/{secret_id}/versions/{version}"
                 response = client.access_secret_version(request={"name": name})
                 return response.payload.data.decode("UTF-8")
-            except Exception:
-                pass
-        return os.environ.get(secret_id, f"dev-value-for-{secret_id}")
+            except Exception as e:
+                logger.warning(f"Failed to retrieve secret from Secret Manager: {str(e)}")
+        
+        # Return a development value only if DEBUG is True
+        if cls.DEBUG:
+            # Generate a deterministic but not easily guessable value for development
+            import hashlib
+            dev_value = hashlib.sha256(f"dev-{secret_id}-{cls.PROJECT_ID or 'local'}".encode()).hexdigest()[:16]
+            logger.warning(f"Using generated development value for {secret_id}")
+            return dev_value
+        else:
+            logger.error(f"No secret value found for {secret_id} and not in debug mode")
+            return None
+
+# Set SECRET_KEY safely
+# Try to get from environment or Secret Manager or generate a secure one
+try:
+    SECRET_KEY = Config.get_secret("SECRET_KEY")
+    if not SECRET_KEY:
+        # If still no SECRET_KEY, generate one in debug mode or raise error
+        if Config.DEBUG:
+            import secrets
+            SECRET_KEY = secrets.token_hex(32)
+            logger.warning("Generated random SECRET_KEY for debug mode")
+        else:
+            # In production without a key, log error but don't crash
+            SECRET_KEY = "MISSING_SECRET_KEY"
+            logger.error("SECRET_KEY is missing in production mode! Using placeholder but this is NOT secure.")
+    # Add SECRET_KEY to Config class namespace
+    setattr(Config, 'SECRET_KEY', SECRET_KEY)
+except Exception as e:
+    logger.error(f"Error setting SECRET_KEY: {str(e)}")
+    # Set a fallback in case of error, but log prominently
+    setattr(Config, 'SECRET_KEY', os.environ.get('SECRET_KEY', 'emergency-fallback-key-not-secure'))
+    logger.error("Using emergency fallback SECRET_KEY - this is NOT secure for production!")
