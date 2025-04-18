@@ -1,0 +1,262 @@
+{% extends 'base.html' %}
+
+{% block title %}Documentation - {{ app_name }}{% endblock %}
+
+{% block head %}
+<style>
+    .doc-sidebar {
+        background-color: #f8f9fa;
+        padding: 20px;
+        border-radius: 8px;
+        position: sticky;
+        top: 20px;
+    }
+    .doc-sidebar ul {
+        list-style-type: none;
+        padding-left: 0;
+    }
+    .doc-sidebar li {
+        margin-bottom: 10px;
+    }
+    .doc-sidebar li a {
+        display: block;
+        padding: 5px 10px;
+        border-radius: 4px;
+    }
+    .doc-sidebar li a:hover {
+        background-color: #e9ecef;
+    }
+    .doc-section {
+        margin-bottom: 40px;
+    }
+    .doc-section h3 {
+        color: #4a6fa5;
+        border-bottom: 1px solid #eaeaea;
+        padding-bottom: 10px;
+        margin-bottom: 20px;
+    }
+    .doc-code {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 5px;
+        font-family: monospace;
+        margin: 15px 0;
+        overflow-x: auto;
+    }
+    .doc-tip {
+        background-color: #d1ecf1;
+        border-left: 4px solid #17a2b8;
+        padding: 15px;
+        margin: 15px 0;
+        border-radius: 4px;
+    }
+    .doc-warning {
+        background-color: #fff3cd;
+        border-left: 4px solid #ffc107;
+        padding: 15px;
+        margin: 15px 0;
+        border-radius: 4px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>Documentation</h1>
+    <a href="{{ url_for('web.index') }}" class="btn btn-outline-secondary">
+        <i class="fas fa-arrow-left"></i> Back to Home
+    </a>
+</div>
+
+<div class="row">
+    <!-- Sidebar Navigation -->
+    <div class="col-md-3">
+        <div class="doc-sidebar">
+            <h5>Contents</h5>
+            <ul>
+                <li><a href="#overview">Platform Overview</a></li>
+                <li><a href="#malware-analysis">Malware Analysis</a></li>
+                <li><a href="#detonation">Detonation Service</a></li>
+                <li><a href="#visualization">Visualization Tools</a></li>
+                <li><a href="#api">API Documentation</a></li>
+                <li><a href="#security">Security Considerations</a></li>
+                <li><a href="#troubleshooting">Troubleshooting</a></li>
+            </ul>
+        </div>
+    </div>
+    
+    <!-- Main Content -->
+    <div class="col-md-9">
+        <div id="overview" class="doc-section">
+            <h3>Platform Overview</h3>
+            <p>The Malware Detonation Platform is a comprehensive solution for analyzing malicious software in a secure, isolated environment. The platform consists of several integrated modules:</p>
+            
+            <ul>
+                <li><strong>Malware Repository</strong> - Upload, store, and manage malware samples</li>
+                <li><strong>Detonation Environment</strong> - Execute malware in isolated virtual machines</li>
+                <li><strong>Analysis Engine</strong> - Extract and analyze behavior, network activity, and system changes</li>
+                <li><strong>Visualization Tools</strong> - Create visualizations and reports from analysis results</li>
+            </ul>
+            
+            <div class="doc-tip">
+                <i class="fas fa-info-circle"></i> <strong>Tip:</strong> For best results, start by uploading a sample, then detonate it, and finally create visualizations from the results.
+            </div>
+        </div>
+        
+        <div id="malware-analysis" class="doc-section">
+            <h3>Malware Analysis</h3>
+            <p>The malware analysis module allows you to upload, store, and manage malware samples securely.</p>
+            
+            <h5>Uploading Samples</h5>
+            <p>To upload a malware sample:</p>
+            <ol>
+                <li>Navigate to the <a href="{{ url_for('malware.upload') }}">Upload</a> page</li>
+                <li>Select the file to upload</li>
+                <li>Add a descriptive name and tags</li>
+                <li>Click the Upload button</li>
+            </ol>
+            
+            <div class="doc-warning">
+                <i class="fas fa-exclamation-triangle"></i> <strong>Warning:</strong> Always handle malware samples with care. The platform will store them securely, but they should be considered dangerous.
+            </div>
+            
+            <h5>Sample Information</h5>
+            <p>For each sample, the platform automatically calculates:</p>
+            <ul>
+                <li>SHA256, MD5, and SHA1 hashes</li>
+                <li>File type and size</li>
+                <li>Basic static properties</li>
+            </ul>
+        </div>
+        
+        <div id="detonation" class="doc-section">
+            <h3>Detonation Service</h3>
+            <p>The detonation service executes malware samples in isolated virtual machines to observe their behavior.</p>
+            
+            <h5>Creating a Detonation Job</h5>
+            <p>To detonate a malware sample:</p>
+            <ol>
+                <li>Navigate to the malware sample's details page</li>
+                <li>Click the "Detonate Sample" button</li>
+                <li>Select the appropriate VM environment</li>
+                <li>Start the detonation process</li>
+            </ol>
+            
+            <h5>VM Environments</h5>
+            <p>Available virtual machine environments include:</p>
+            <ul>
+                <li>Windows 10 (x64)</li>
+                <li>Windows 7 (x64)</li>
+                <li>Ubuntu 20.04</li>
+            </ul>
+            
+            <h5>Detonation Results</h5>
+            <p>After detonation completes, you'll have access to:</p>
+            <ul>
+                <li>Process execution tree</li>
+                <li>Network activity</li>
+                <li>File system changes</li>
+                <li>Registry modifications (Windows)</li>
+                <li>Screenshots</li>
+            </ul>
+        </div>
+        
+        <div id="visualization" class="doc-section">
+            <h3>Visualization Tools</h3>
+            <p>The visualization module allows you to create visual representations of analysis data.</p>
+            
+            <h5>Creating Visualizations</h5>
+            <p>To create a visualization:</p>
+            <ol>
+                <li>Navigate to the Visualizations page</li>
+                <li>Click "New Visualization"</li>
+                <li>Select a data source (sample or detonation result)</li>
+                <li>Choose a visualization type</li>
+                <li>Configure the visualization parameters</li>
+            </ol>
+            
+            <h5>Available Visualization Types</h5>
+            <ul>
+                <li>Bar Charts</li>
+                <li>Line Charts</li>
+                <li>Scatter Plots</li>
+                <li>Pie Charts</li>
+                <li>Heatmaps</li>
+                <li>Network Graphs</li>
+            </ul>
+            
+            <div class="doc-tip">
+                <i class="fas fa-info-circle"></i> <strong>Tip:</strong> Network graphs are particularly useful for visualizing malware communication patterns and process relationships.
+            </div>
+        </div>
+        
+        <div id="api" class="doc-section">
+            <h3>API Documentation</h3>
+            <p>The platform provides a RESTful API for integration with other tools and services.</p>
+            
+            <h5>Authentication</h5>
+            <p>API requests require authentication using an API key:</p>
+            
+            <div class="doc-code">
+curl -H "Authorization: Bearer YOUR_API_KEY" https://your-instance/api/v1/samples
+            </div>
+            
+            <h5>Endpoints</h5>
+            <p>Key API endpoints include:</p>
+            <ul>
+                <li><code>/api/samples</code> - List/create malware samples</li>
+                <li><code>/api/samples/{id}</code> - Get sample details</li>
+                <li><code>/api/detonation</code> - List/create detonation jobs</li>
+                <li><code>/api/detonation/{id}</code> - Get detonation job status/results</li>
+                <li><code>/api/visualizations</code> - List/create visualizations</li>
+            </ul>
+        </div>
+        
+        <div id="security" class="doc-section">
+            <h3>Security Considerations</h3>
+            <p>The platform is designed with security as a primary concern:</p>
+            
+            <ul>
+                <li><strong>Isolation</strong> - Malware executes in completely isolated VMs</li>
+                <li><strong>Network Controls</strong> - Restricted network access for detonation VMs</li>
+                <li><strong>Access Control</strong> - Role-based access to platform features</li>
+                <li><strong>Secure Storage</strong> - Encrypted storage of malware samples</li>
+            </ul>
+            
+            <div class="doc-warning">
+                <i class="fas fa-exclamation-triangle"></i> <strong>Warning:</strong> Always follow your organization's security guidelines when using the platform.
+            </div>
+        </div>
+        
+        <div id="troubleshooting" class="doc-section">
+            <h3>Troubleshooting</h3>
+            <p>Common issues and their solutions:</p>
+            
+            <h5>Detonation Job Fails</h5>
+            <ul>
+                <li>Check if the VM pool has available resources</li>
+                <li>Verify the sample is not corrupt</li>
+                <li>Check system logs for detailed error messages</li>
+            </ul>
+            
+            <h5>Missing Results</h5>
+            <ul>
+                <li>Ensure the detonation completed successfully</li>
+                <li>Check if the sample executed properly in the VM</li>
+                <li>Verify storage permissions are correct</li>
+            </ul>
+            
+            <h5>Performance Issues</h5>
+            <ul>
+                <li>Limit concurrent detonation jobs</li>
+                <li>Monitor resource usage on host systems</li>
+                <li>Consider increasing VM resources for complex samples</li>
+            </ul>
+            
+            <div class="doc-tip">
+                <i class="fas fa-info-circle"></i> <strong>Tip:</strong> The System Diagnostics page provides valuable information for troubleshooting.
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
