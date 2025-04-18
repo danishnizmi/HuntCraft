@@ -66,356 +66,374 @@ RUN mkdir -p /app/data/uploads && \
     chmod -R 755 /app/logs
 
 # Create fallback WSGI application
-RUN echo 'from flask import Flask, render_template_string, jsonify\n\
-\n\
-# Create a minimal app that will definitely work\n\
-app = Flask(__name__)\n\
-\n\
-@app.route("/")\n\
-def home():\n\
-    return render_template_string("""\n\
-    <!DOCTYPE html>\n\
-    <html>\n\
-    <head>\n\
-        <title>Malware Detonation Platform</title>\n\
-        <style>\n\
-            body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }\n\
-            h1 { color: #4a6fa5; }\n\
-            .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin: 20px auto; max-width: 800px; }\n\
-            a { color: #4a6fa5; text-decoration: none; padding: 8px 16px; margin: 5px; display: inline-block; border: 1px solid #4a6fa5; border-radius: 4px; }\n\
-            a:hover { background-color: #4a6fa5; color: white; }\n\
-        </style>\n\
-    </head>\n\
-    <body>\n\
-        <h1>Malware Detonation Platform</h1>\n\
-        <div class="card">\n\
-            <p>Welcome to the Malware Detonation Platform.</p>\n\
-            <div>\n\
-                <a href="/malware">Malware Analysis</a>\n\
-                <a href="/detonation">Detonation Service</a>\n\
-                <a href="/viz">Visualizations</a>\n\
-            </div>\n\
-            <p style="margin-top: 20px;">\n\
-                <small>Fallback app is active - the main application could not be loaded.</small>\n\
-            </p>\n\
-        </div>\n\
-    </body>\n\
-    </html>\n\
-    """)\n\
-\n\
-@app.route("/health")\n\
-def health():\n\
-    return jsonify({"status": "healthy", "message": "Fallback WSGI app is running"})\n\
-\n\
-# If called directly (via Gunicorn), run the app\n\
-if __name__ == "__main__":\n\
-    app.run(host="0.0.0.0", port=8080)\n\
-' > /app/fallback_app.py
+RUN cat > /app/fallback_app.py << 'EOF'
+from flask import Flask, render_template_string, jsonify
+
+# Create a minimal app that will definitely work
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Malware Detonation Platform</title>
+        <style>
+            body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+            h1 { color: #4a6fa5; }
+            .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin: 20px auto; max-width: 800px; }
+            a { color: #4a6fa5; text-decoration: none; padding: 8px 16px; margin: 5px; display: inline-block; border: 1px solid #4a6fa5; border-radius: 4px; }
+            a:hover { background-color: #4a6fa5; color: white; }
+        </style>
+    </head>
+    <body>
+        <h1>Malware Detonation Platform</h1>
+        <div class="card">
+            <p>Welcome to the Malware Detonation Platform.</p>
+            <div>
+                <a href="/malware">Malware Analysis</a>
+                <a href="/detonation">Detonation Service</a>
+                <a href="/viz">Visualizations</a>
+            </div>
+            <p style="margin-top: 20px;">
+                <small>Fallback app is active - the main application could not be loaded.</small>
+            </p>
+        </div>
+    </body>
+    </html>
+    """)
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "healthy", "message": "Fallback WSGI app is running"})
+
+# If called directly (via Gunicorn), run the app
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
+EOF
 
 # Create direct routes helper
-RUN echo 'from flask import Blueprint, render_template_string, redirect, url_for, jsonify\n\
-\n\
-# Create blueprint with explicit empty URL prefix\n\
-direct_bp = Blueprint("direct", __name__, url_prefix="")\n\
-\n\
-@direct_bp.route("/")\n\
-def index():\n\
-    """Direct root route handler."""\n\
-    return render_template_string("""\n\
-    <!DOCTYPE html>\n\
-    <html>\n\
-    <head>\n\
-        <title>Malware Detonation Platform</title>\n\
-        <style>\n\
-            body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }\n\
-            h1 { color: #4a6fa5; }\n\
-            .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin: 20px auto; max-width: 800px; }\n\
-            a { color: #4a6fa5; text-decoration: none; padding: 8px 16px; margin: 5px; display: inline-block; border: 1px solid #4a6fa5; border-radius: 4px; }\n\
-            a:hover { background-color: #4a6fa5; color: white; }\n\
-        </style>\n\
-    </head>\n\
-    <body>\n\
-        <h1>Malware Detonation Platform</h1>\n\
-        <div class="card">\n\
-            <p>Welcome to the Malware Detonation Platform.</p>\n\
-            <div>\n\
-                <a href="/malware">Malware Analysis</a>\n\
-                <a href="/detonation">Detonation Service</a>\n\
-                <a href="/viz">Visualizations</a>\n\
-                <a href="/diagnostic">System Diagnostics</a>\n\
-            </div>\n\
-        </div>\n\
-    </body>\n\
-    </html>\n\
-    """)\n\
-\n\
-@direct_bp.route("/health")\n\
-def health():\n\
-    """Health check endpoint."""\n\
-    return jsonify({"status": "healthy", "source": "direct_blueprint"})\n\
-\n\
-def register_direct_routes(app):\n\
-    """Register direct routes on the Flask app"""\n\
-    app.register_blueprint(direct_bp)\n\
-    print("Direct routes registered successfully")\n\
-' > /app/direct_routes.py
+RUN cat > /app/direct_routes.py << 'EOF'
+from flask import Blueprint, render_template_string, redirect, url_for, jsonify
+
+# Create blueprint with explicit empty URL prefix
+direct_bp = Blueprint("direct", __name__, url_prefix="")
+
+@direct_bp.route("/")
+def index():
+    """Direct root route handler."""
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Malware Detonation Platform</title>
+        <style>
+            body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+            h1 { color: #4a6fa5; }
+            .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin: 20px auto; max-width: 800px; }
+            a { color: #4a6fa5; text-decoration: none; padding: 8px 16px; margin: 5px; display: inline-block; border: 1px solid #4a6fa5; border-radius: 4px; }
+            a:hover { background-color: #4a6fa5; color: white; }
+        </style>
+    </head>
+    <body>
+        <h1>Malware Detonation Platform</h1>
+        <div class="card">
+            <p>Welcome to the Malware Detonation Platform.</p>
+            <div>
+                <a href="/malware">Malware Analysis</a>
+                <a href="/detonation">Detonation Service</a>
+                <a href="/viz">Visualizations</a>
+                <a href="/diagnostic">System Diagnostics</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    """)
+
+@direct_bp.route("/health")
+def health():
+    """Health check endpoint."""
+    return jsonify({"status": "healthy", "source": "direct_blueprint"})
+
+def register_direct_routes(app):
+    """Register direct routes on the Flask app"""
+    app.register_blueprint(direct_bp)
+    print("Direct routes registered successfully")
+EOF
 
 # Create essential templates
-RUN echo '<!DOCTYPE html>\n\
-<html>\n\
-<head>\n\
-    <title>Malware Detonation Platform</title>\n\
-    <style>\n\
-        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }\n\
-        h1 { color: #4a6fa5; }\n\
-        .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin: 20px auto; max-width: 800px; }\n\
-        a { color: #4a6fa5; text-decoration: none; padding: 8px 16px; margin: 5px; display: inline-block; border: 1px solid #4a6fa5; border-radius: 4px; }\n\
-        a:hover { background-color: #4a6fa5; color: white; }\n\
-    </style>\n\
-</head>\n\
-<body>\n\
-    <h1>Malware Detonation Platform</h1>\n\
-    <div class="card">\n\
-        <p>Welcome to the Malware Detonation Platform.</p>\n\
-        <div>\n\
-            <a href="/malware">Malware Analysis</a>\n\
-            <a href="/detonation">Detonation Service</a>\n\
-            <a href="/viz">Visualizations</a>\n\
-            <a href="/diagnostic">System Diagnostics</a>\n\
-        </div>\n\
-    </div>\n\
-</body>\n\
-</html>' > /app/templates/index.html && \
-    echo '<!DOCTYPE html>\n\
-<html lang="en">\n\
-<head>\n\
-    <meta charset="UTF-8">\n\
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n\
-    <title>{% block title %}{{ app_name }}{% endblock %}</title>\n\
-    <style>\n\
-        body { font-family: Arial, sans-serif; margin: 40px; }\n\
-        h1 { color: #4a6fa5; }\n\
-        .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin-top: 20px; }\n\
-        a { color: #4a6fa5; text-decoration: none; }\n\
-        a:hover { text-decoration: underline; }\n\
-    </style>\n\
-    {% block head %}{% endblock %}\n\
-</head>\n\
-<body>\n\
-    <h1>{% block header %}{{ app_name }}{% endblock %}</h1>\n\
-    {% block content %}{% endblock %}\n\
-</body>\n\
-</html>' > /app/templates/base.html && \
-    echo '{% extends "base.html" %}\n\
-{% block title %}Error{% endblock %}\n\
-{% block content %}\n\
-<div class="card">\n\
-    <h2>Error</h2>\n\
-    <p>{{ error_message }}</p>\n\
-    <a href="/">Return to Home</a>\n\
-</div>\n\
-{% endblock %}' > /app/templates/error.html
+RUN mkdir -p /app/templates && \
+    cat > /app/templates/index.html << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Malware Detonation Platform</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+        h1 { color: #4a6fa5; }
+        .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin: 20px auto; max-width: 800px; }
+        a { color: #4a6fa5; text-decoration: none; padding: 8px 16px; margin: 5px; display: inline-block; border: 1px solid #4a6fa5; border-radius: 4px; }
+        a:hover { background-color: #4a6fa5; color: white; }
+    </style>
+</head>
+<body>
+    <h1>Malware Detonation Platform</h1>
+    <div class="card">
+        <p>Welcome to the Malware Detonation Platform.</p>
+        <div>
+            <a href="/malware">Malware Analysis</a>
+            <a href="/detonation">Detonation Service</a>
+            <a href="/viz">Visualizations</a>
+            <a href="/diagnostic">System Diagnostics</a>
+        </div>
+    </div>
+</body>
+</html>
+EOF
 
-# Create web blueprint URL prefix fixer
-RUN echo '#!/usr/bin/env python3\n\
-import os\n\
-import sys\n\
-import re\n\
-\n\
-def fix_web_blueprint():\n\
-    """Fix the web_blueprint URL prefix issue in web_interface.py"""\n\
-    filepath = "/app/web_interface.py"\n\
-    if not os.path.exists(filepath):\n\
-        print(f"ERROR: {filepath} not found")\n\
-        return False\n\
-        \n\
-    try:\n\
-        with open(filepath, "r") as f:\n\
-            content = f.read()\n\
-            \n\
-        # Fix 1: Ensure blueprint has empty URL prefix\n\
-        content = re.sub(\n\
-            r"web_bp = Blueprint\\(\'web\', __name__(?:, url_prefix=[^\'])?\\)",\n\
-            "web_bp = Blueprint(\'web\', __name__, url_prefix=\'\')",\n\
-            content\n\
-        )\n\
-        \n\
-        # Fix 2: Ensure root route is registered on the blueprint\n\
-        if "def index():" in content and "@web_bp.route(\'/\')" not in content:\n\
-            content = content.replace(\n\
-                "def index():",\n\
-                "@web_bp.route(\'/\')\ndef index():"\n\
-            )\n\
-            \n\
-        # Write fixed content back\n\
-        with open(filepath, "w") as f:\n\
-            f.write(content)\n\
-            \n\
-        print(f"Successfully fixed web blueprint in {filepath}")\n\
-        return True\n\
-    except Exception as e:\n\
-        print(f"Error fixing web blueprint: {e}")\n\
-        return False\n\
-\n\
-if __name__ == "__main__":\n\
-    if fix_web_blueprint():\n\
-        sys.exit(0)\n\
-    else:\n\
-        sys.exit(1)\n\
-' > /app/fix_blueprint.py && chmod +x /app/fix_blueprint.py
+RUN cat > /app/templates/base.html << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ app_name }}{% endblock %}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        h1 { color: #4a6fa5; }
+        .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin-top: 20px; }
+        a { color: #4a6fa5; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <h1>{% block header %}{{ app_name }}{% endblock %}</h1>
+    {% block content %}{% endblock %}
+</body>
+</html>
+EOF
+
+RUN cat > /app/templates/error.html << 'EOF'
+{% extends "base.html" %}
+{% block title %}Error{% endblock %}
+{% block content %}
+<div class="card">
+    <h2>Error</h2>
+    <p>{{ error_message }}</p>
+    <a href="/">Return to Home</a>
+</div>
+{% endblock %}
+EOF
+
+# Create web blueprint URL prefix fixer - using heredoc to prevent shell syntax issues
+RUN cat > /app/fix_blueprint.py << 'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+import re
+
+def fix_web_blueprint():
+    """Fix the web_blueprint URL prefix issue in web_interface.py"""
+    filepath = "/app/web_interface.py"
+    if not os.path.exists(filepath):
+        print(f"ERROR: {filepath} not found")
+        return False
+        
+    try:
+        with open(filepath, "r") as f:
+            content = f.read()
+            
+        # Fix 1: Ensure blueprint has empty URL prefix
+        content = re.sub(
+            r"web_bp = Blueprint\('web', __name__(?:, url_prefix=[^']*)?(?:\)",
+            "web_bp = Blueprint('web', __name__, url_prefix='')",
+            content
+        )
+        
+        # Fix 2: Ensure root route is registered on the blueprint
+        if "def index():" in content and "@web_bp.route('/')" not in content:
+            content = content.replace(
+                "def index():",
+                "@web_bp.route('/')\ndef index():"
+            )
+            
+        # Write fixed content back
+        with open(filepath, "w") as f:
+            f.write(content)
+            
+        print(f"Successfully fixed web blueprint in {filepath}")
+        return True
+    except Exception as e:
+        print(f"Error fixing web blueprint: {e}")
+        return False
+
+if __name__ == "__main__":
+    if fix_web_blueprint():
+        sys.exit(0)
+    else:
+        sys.exit(1)
+EOF
+RUN chmod +x /app/fix_blueprint.py
 
 # Create a smart startup script with fallback mechanisms
-RUN echo '#!/bin/bash\n\
-\n\
-# Initialize log file\n\
-LOGFILE="/app/logs/startup-$(date +%Y%m%d-%H%M%S).log"\n\
-mkdir -p /app/logs\n\
-touch $LOGFILE\n\
-\n\
-# Log function\n\
-log() {\n\
-    echo "[$(date +"%Y-%m-%d %H:%M:%S")] $1" | tee -a "$LOGFILE"\n\
-}\n\
-\n\
-log "Starting application initialization..."\n\
-log "Python version: $(python --version)"\n\
-\n\
-# Ensure directories exist\n\
-mkdir -p /app/data/uploads\n\
-mkdir -p /app/data/database\n\
-mkdir -p /app/static/css\n\
-mkdir -p /app/static/js\n\
-mkdir -p /app/templates\n\
-chmod -R 755 /app/data\n\
-\n\
-# Fix web blueprint URL prefix - crucial for resolving 404 issues\n\
-log "Fixing web blueprint URL prefix..."\n\
-python /app/fix_blueprint.py\n\
-\n\
-# Pre-initialize database schema to avoid runtime delays\n\
-if [ "${SKIP_DB_INIT}" != "true" ]; then\n\
-  log "Pre-initializing database schema..."\n\
-  python -c "from flask import Flask; app = Flask(__name__); app.config[\'DATABASE_PATH\'] = \'/app/data/malware_platform.db\'; app.config[\'APP_NAME\'] = \'Malware Detonation Platform\'; from database import init_app; init_app(app)" || \n\
-  log "Warning: Database initialization encountered an issue. Continuing startup..."\n\
-fi\n\
-\n\
-# Check for duplicate code in database.py and fix if found\n\
-if [ -f /app/database.py ]; then\n\
-  DUPE_COUNT=$(grep -c "def ensure_db_directory_exists(app):" /app/database.py || echo "0")\n\
-  if [ "$DUPE_COUNT" -gt 1 ]; then\n\
-    log "WARNING: Duplicate function in database.py, attempting to fix..."\n\
-    # Create a temporary file with the fixed content\n\
-    awk \'/def ensure_db_directory_exists\\(app\\)/{count++; if(count>1){skip=1;next}} skip==1 && /^def /{skip=0} skip!=1{print}\' /app/database.py > /app/database.py.fixed\n\
-    # Check if the fix worked\n\
-    if [ -s /app/database.py.fixed ]; then\n\
-      mv /app/database.py.fixed /app/database.py\n\
-      log "Fixed duplicate code in database.py"\n\
-    else\n\
-      log "Warning: Failed to fix database.py. Original file unchanged."\n\
-    fi\n\
-  fi\n\
-fi\n\
-\n\
-# Create .app_ready file to indicate service is starting up\n\
-touch /app/data/.app_ready\n\
-\n\
-# Test if the main app can be created\n\
-log "Testing main app creation..."\n\
-MAIN_APP_TEST=$(python -c "try:\n\
-    from main import create_app\n\
-    app = create_app()\n\
-    from direct_routes import direct_bp\n\
-    app.register_blueprint(direct_bp)\n\
-    print(\'SUCCESS\')\n\
-    exit(0)\n\
-except Exception as e:\n\
-    print(f\'ERROR: {e}\')\n\
-    exit(1)" 2>&1)\n\
-\n\
-MAIN_APP_STATUS=$?\n\
-log "Main app test result: $MAIN_APP_TEST"\n\
-\n\
-# Start the appropriate app based on test results\n\
-if [ $MAIN_APP_STATUS -eq 0 ]; then\n\
-    # Start the main application\n\
-    log "Starting the main application..."\n\
-    \n\
-    # Write "ready" to app status file\n\
-    echo "ready" > /app/data/.app_ready\n\
-    \n\
-    # Start with Gunicorn\n\
-    exec gunicorn --bind 0.0.0.0:${PORT:-8080} \\\n\
-        --workers=1 \\\n\
-        --threads=4 \\\n\
-        --timeout=300 \\\n\
-        --graceful-timeout=120 \\\n\
-        --keep-alive=120 \\\n\
-        --worker-tmp-dir=/dev/shm \\\n\
-        --worker-class=gthread \\\n\
-        --max-requests=1000 \\\n\
-        --max-requests-jitter=50 \\\n\
-        --access-logfile=- \\\n\
-        --error-logfile=- \\\n\
-        --log-level=info \\\n\
-        --capture-output \\\n\
-        "main:create_app()"\n\
-else\n\
-    # Fall back to the standalone direct routes application\n\
-    log "ERROR: Main application failed to initialize. Starting fallback app..."\n\
-    \n\
-    # Write "fallback" to app status file\n\
-    echo "fallback" > /app/data/.app_ready\n\
-    \n\
-    # Start the fallback application\n\
-    exec gunicorn --bind 0.0.0.0:${PORT:-8080} \\\n\
-        --workers=1 \\\n\
-        --threads=4 \\\n\
-        --timeout=300 \\\n\
-        --graceful-timeout=120 \\\n\
-        --keep-alive=120 \\\n\
-        --worker-tmp-dir=/dev/shm \\\n\
-        --worker-class=gthread \\\n\
-        --max-requests=1000 \\\n\
-        --max-requests-jitter=50 \\\n\
-        --access-logfile=- \\\n\
-        --error-logfile=- \\\n\
-        --log-level=info \\\n\
-        --capture-output \\\n\
-        "fallback_app:app"\n\
-fi\n\
-' > /app/start.sh && chmod +x /app/start.sh
+RUN cat > /app/start.sh << 'EOF'
+#!/bin/bash
+
+# Initialize log file
+LOGFILE="/app/logs/startup-$(date +%Y%m%d-%H%M%S).log"
+mkdir -p /app/logs
+touch $LOGFILE
+
+# Log function
+log() {
+    echo "[$(date +"%Y-%m-%d %H:%M:%S")] $1" | tee -a "$LOGFILE"
+}
+
+log "Starting application initialization..."
+log "Python version: $(python --version)"
+
+# Ensure directories exist
+mkdir -p /app/data/uploads
+mkdir -p /app/data/database
+mkdir -p /app/static/css
+mkdir -p /app/static/js
+mkdir -p /app/templates
+chmod -R 755 /app/data
+
+# Fix web blueprint URL prefix - crucial for resolving 404 issues
+log "Fixing web blueprint URL prefix..."
+python /app/fix_blueprint.py
+
+# Pre-initialize database schema to avoid runtime delays
+if [ "${SKIP_DB_INIT}" != "true" ]; then
+  log "Pre-initializing database schema..."
+  python -c "from flask import Flask; app = Flask(__name__); app.config['DATABASE_PATH'] = '/app/data/malware_platform.db'; app.config['APP_NAME'] = 'Malware Detonation Platform'; from database import init_app; init_app(app)" || \
+  log "Warning: Database initialization encountered an issue. Continuing startup..."
+fi
+
+# Check for duplicate code in database.py and fix if found
+if [ -f /app/database.py ]; then
+  DUPE_COUNT=$(grep -c "def ensure_db_directory_exists(app):" /app/database.py || echo "0")
+  if [ "$DUPE_COUNT" -gt 1 ]; then
+    log "WARNING: Duplicate function in database.py, attempting to fix..."
+    # Create a temporary file with the fixed content
+    awk '/def ensure_db_directory_exists\(app\)/{count++; if(count>1){skip=1;next}} skip==1 && /^def /{skip=0} skip!=1{print}' /app/database.py > /app/database.py.fixed
+    # Check if the fix worked
+    if [ -s /app/database.py.fixed ]; then
+      mv /app/database.py.fixed /app/database.py
+      log "Fixed duplicate code in database.py"
+    else
+      log "Warning: Failed to fix database.py. Original file unchanged."
+    fi
+  fi
+fi
+
+# Create .app_ready file to indicate service is starting up
+touch /app/data/.app_ready
+
+# Test if the main app can be created
+log "Testing main app creation..."
+MAIN_APP_TEST=$(python -c "try:
+    from main import create_app
+    app = create_app()
+    from direct_routes import direct_bp
+    app.register_blueprint(direct_bp)
+    print('SUCCESS')
+    exit(0)
+except Exception as e:
+    print(f'ERROR: {e}')
+    exit(1)" 2>&1)
+
+MAIN_APP_STATUS=$?
+log "Main app test result: $MAIN_APP_TEST"
+
+# Start the appropriate app based on test results
+if [ $MAIN_APP_STATUS -eq 0 ]; then
+    # Start the main application
+    log "Starting the main application..."
+    
+    # Write "ready" to app status file
+    echo "ready" > /app/data/.app_ready
+    
+    # Start with Gunicorn
+    exec gunicorn --bind 0.0.0.0:${PORT:-8080} \
+        --workers=1 \
+        --threads=4 \
+        --timeout=300 \
+        --graceful-timeout=120 \
+        --keep-alive=120 \
+        --worker-tmp-dir=/dev/shm \
+        --worker-class=gthread \
+        --max-requests=1000 \
+        --max-requests-jitter=50 \
+        --access-logfile=- \
+        --error-logfile=- \
+        --log-level=info \
+        --capture-output \
+        "main:create_app()"
+else
+    # Fall back to the standalone direct routes application
+    log "ERROR: Main application failed to initialize. Starting fallback app..."
+    
+    # Write "fallback" to app status file
+    echo "fallback" > /app/data/.app_ready
+    
+    # Start the fallback application
+    exec gunicorn --bind 0.0.0.0:${PORT:-8080} \
+        --workers=1 \
+        --threads=4 \
+        --timeout=300 \
+        --graceful-timeout=120 \
+        --keep-alive=120 \
+        --worker-tmp-dir=/dev/shm \
+        --worker-class=gthread \
+        --max-requests=1000 \
+        --max-requests-jitter=50 \
+        --access-logfile=- \
+        --error-logfile=- \
+        --log-level=info \
+        --capture-output \
+        "fallback_app:app"
+fi
+EOF
+RUN chmod +x /app/start.sh
 
 # Create a robust health check script
-RUN echo '#!/bin/bash\n\
-\n\
-# Simple health check that always returns success to avoid container restarts\n\
-echo "{\\"status\\": \\"healthy\\", \\"timestamp\\": \\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\\"}"\n\
-exit 0\n\
-' > /app/health-check.sh && chmod +x /app/health-check.sh
+RUN cat > /app/health-check.sh << 'EOF'
+#!/bin/bash
+
+# Simple health check that always returns success to avoid container restarts
+echo '{"status": "healthy", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}'
+exit 0
+EOF
+RUN chmod +x /app/health-check.sh
 
 # Create robust app readiness handler
-RUN echo 'import os\n\
-import atexit\n\
-\n\
-def mark_app_ready():\n\
-    """Mark the application as ready for health checks."""\n\
-    try:\n\
-        with open("/app/data/.app_ready", "w") as f:\n\
-            f.write("ready")\n\
-    except Exception:\n\
-        pass\n\
-\n\
-def cleanup_app_ready():\n\
-    """Remove the app ready marker on shutdown."""\n\
-    try:\n\
-        if os.path.exists("/app/data/.app_ready"):\n\
-            os.remove("/app/data/.app_ready")\n\
-    except Exception:\n\
-        pass\n\
-\n\
-# Register the cleanup function\n\
-atexit.register(cleanup_app_ready)\n\
-' > /app/app_ready.py
+RUN cat > /app/app_ready.py << 'EOF'
+import os
+import atexit
+
+def mark_app_ready():
+    """Mark the application as ready for health checks."""
+    try:
+        with open("/app/data/.app_ready", "w") as f:
+            f.write("ready")
+    except Exception:
+        pass
+
+def cleanup_app_ready():
+    """Remove the app ready marker on shutdown."""
+    try:
+        if os.path.exists("/app/data/.app_ready"):
+            os.remove("/app/data/.app_ready")
+    except Exception:
+        pass
+
+# Register the cleanup function
+atexit.register(cleanup_app_ready)
+EOF
 
 # Copy application code
 COPY . .
