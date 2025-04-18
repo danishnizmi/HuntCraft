@@ -277,6 +277,41 @@ if __name__ == "__main__":
 EOF
 RUN chmod +x /app/fix_blueprint.py
 
+# Create a robust health check script
+RUN cat > /app/health-check.sh << 'EOF'
+#!/bin/bash
+
+# Simple health check that always returns success to avoid container restarts
+echo '{"status": "healthy", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}'
+exit 0
+EOF
+RUN chmod +x /app/health-check.sh
+
+# Create robust app readiness handler
+RUN cat > /app/app_ready.py << 'EOF'
+import os
+import atexit
+
+def mark_app_ready():
+    """Mark the application as ready for health checks."""
+    try:
+        with open("/app/data/.app_ready", "w") as f:
+            f.write("ready")
+    except Exception:
+        pass
+
+def cleanup_app_ready():
+    """Remove the app ready marker on shutdown."""
+    try:
+        if os.path.exists("/app/data/.app_ready"):
+            os.remove("/app/data/.app_ready")
+    except Exception:
+        pass
+
+# Register the cleanup function
+atexit.register(cleanup_app_ready)
+EOF
+
 # Create a smart startup script with fallback mechanisms
 RUN cat > /app/start.sh << 'EOF'
 #!/bin/bash
@@ -399,41 +434,6 @@ else
 fi
 EOF
 RUN chmod +x /app/start.sh
-
-# Create a robust health check script
-RUN cat > /app/health-check.sh << 'EOF'
-#!/bin/bash
-
-# Simple health check that always returns success to avoid container restarts
-echo '{"status": "healthy", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}'
-exit 0
-EOF
-RUN chmod +x /app/health-check.sh
-
-# Create robust app readiness handler
-RUN cat > /app/app_ready.py << 'EOF'
-import os
-import atexit
-
-def mark_app_ready():
-    """Mark the application as ready for health checks."""
-    try:
-        with open("/app/data/.app_ready", "w") as f:
-            f.write("ready")
-    except Exception:
-        pass
-
-def cleanup_app_ready():
-    """Remove the app ready marker on shutdown."""
-    try:
-        if os.path.exists("/app/data/.app_ready"):
-            os.remove("/app/data/.app_ready")
-    except Exception:
-        pass
-
-# Register the cleanup function
-atexit.register(cleanup_app_ready)
-EOF
 
 # Copy application code
 COPY . .
