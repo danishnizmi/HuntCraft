@@ -1,4 +1,3 @@
-# main.py - Modified with centralized utility functions
 from flask import Flask, render_template, jsonify, g, request
 import os
 import logging
@@ -6,7 +5,6 @@ import importlib
 import time
 import sys
 import traceback
-from database import close_db
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -147,189 +145,18 @@ def ensure_index_template(app):
 </div>
 {% endblock %}""")
 
-def feature_detection():
-    """Detect available features and stub implementations"""
-    features = {}
-    
-    # Check for visualization libraries
-    try:
-        import pandas
-        import numpy
-        features['pandas_numpy'] = True
-        
-        try:
-            import plotly
-            features['plotly'] = True
-        except ImportError:
-            features['plotly'] = False
-    except ImportError:
-        features['pandas_numpy'] = False
-        features['plotly'] = False
-    
-    # Check for GCP libraries
-    try:
-        import google.cloud.storage
-        import google.cloud.compute_v1
-        features['gcp'] = True
-    except ImportError:
-        features['gcp'] = False
-    
-    # Check for stub modules vs real ones
-    try:
-        import ssdeep
-        # Test if it's a stub by checking for stub_hash
-        test_hash = ssdeep.hash("test")
-        features['real_ssdeep'] = test_hash != "stub_hash"
-    except (ImportError, AttributeError):
-        features['real_ssdeep'] = False
-    
-    try:
-        import yara
-        # Try to compile a rule - stubs will fail
-        try:
-            rules = yara.compile(source="rule test { condition: true }")
-            features['real_yara'] = True
-        except:
-            features['real_yara'] = False
-    except ImportError:
-        features['real_yara'] = False
-        
-    # Check for script integration readiness
-    features['scripts_available'] = os.path.exists('scripts/reporting.py') and os.path.exists('scripts/sanitizer.py')
-    
-    return features
-
-def register_unified_health_check(app):
-    """Register a consolidated health check endpoint"""
-    @app.route('/health')
-    def health_check():
-        from database import check_database_health
-        
-        health_data = {
-            "status": "healthy",
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "uptime_seconds": int(time.time() - app.config['START_TIME']),
-            "database": check_database_health(),
-            "modules": module_status,
-            "features": feature_detection()
-        }
-        
-        # Determine overall status
-        if health_data["database"]["status"] != "healthy":
-            health_data["status"] = "degraded"
-            
-        for module, status in module_status.items():
-            if not status.get("initialized", False):
-                health_data["status"] = "degraded"
-                break
-                
-        return jsonify(health_data)
-
-def create_app(test_config=None):
-    """Create and configure the Flask application."""
-    # Record start time for uptime tracking
-    start_time = time.time()
-    
-    # Create Flask app with explicit template and static folders
-    app = Flask(__name__, 
-                static_folder='static',
-                template_folder='templates')
-    
-    # Explicitly set the paths to avoid any path resolution issues
-    app.static_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
-    app.template_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
-    
-    # Load configuration
-    app.config.update({
-        'DATABASE_PATH': os.environ.get('DATABASE_PATH', '/app/data/malware_platform.db'),
-        'UPLOAD_FOLDER': os.environ.get('UPLOAD_FOLDER', '/app/data/uploads'),
-        'MAX_UPLOAD_SIZE_MB': int(os.environ.get('MAX_UPLOAD_SIZE_MB', 100)),
-        'DEBUG': os.environ.get('DEBUG', 'False').lower() in ('true', '1', 't'),
-        'APP_NAME': os.environ.get('APP_NAME', "Malware Detonation Platform"),
-        'GENERATE_TEMPLATES': os.environ.get('GENERATE_TEMPLATES', 'True').lower() in ('true', '1', 't'),
-        'START_TIME': start_time
-    })
-    
-    # Set MAX_CONTENT_LENGTH based on MAX_UPLOAD_SIZE_MB
-    app.config['MAX_CONTENT_LENGTH'] = app.config['MAX_UPLOAD_SIZE_MB'] * 1024 * 1024
-    
-    # Create required directories
-    setup_dirs = [
-        os.path.dirname(app.config.get('DATABASE_PATH')),
-        app.config.get('UPLOAD_FOLDER'),
-        os.path.join(app.static_folder, 'css'),
-        os.path.join(app.static_folder, 'js'),
-        app.template_folder
-    ]
-    
-    for directory in setup_dirs:
-        os.makedirs(directory, exist_ok=True)
-    
-    # Register direct root handler as fallback
-    app.add_url_rule('/', 'direct_root', direct_root_handler)
-    
-    # Register unified health check
-    register_unified_health_check(app)
-    
-    # Set up request tracking
-    @app.before_request
-    def before_request():
-        g.start_time = time.time()
-        
-    @app.after_request
-    def after_request(response):
-        if hasattr(g, 'start_time'):
-            duration = time.time() - g.start_time
-            response.headers['X-Request-Duration'] = str(duration)
-        return response
-    
-    # Ensure templates exist
-    ensure_index_template(app)
-    
-    # Initialize database
-    try:
-        with app.app_context():
-            from database import init_app as init_db
-            init_db(app)
-    except Exception as e:
-        logger.error(f"Database initialization error: {e}")
-    
-    # Initialize modules
-    with app.app_context():
-        # First register web blueprint directly for root route handling
-        try:
-            from web_interface import web_bp
-            app.register_blueprint(web_bp)
-            logger.info("Direct web blueprint registration successful")
-        except Exception as e:
-            logger.error(f"Error directly registering web blueprint: {e}")
-        
-        # Now initialize modules in the defined order
-        for module_name in MODULE_INIT_ORDER:
-            try:
-                module = get_module(module_name)
-                if module and hasattr(module, 'init_app'):
-                    module.init_app(app)
-                    module_status[module_name]['initialized'] = True
-                    logger.info(f"Module {module_name} initialized successfully")
-            except Exception as e:
-                logger.error(f"Error initializing module {module_name}: {e}")
-                module_status[module_name]['error'] = str(e)
-    
-    # Mark application as ready
-    try:
-        from app_ready import mark_app_ready
-        mark_app_ready()
-        logger.info("Application marked as ready")
-    except Exception as e:
-        logger.warning(f"Could not mark application as ready: {e}")
-    
-    logger.info(f"Application startup completed in {time.time() - start_time:.2f} seconds")
-    return app
-
-# Template generation utility that can be used by multiple modules
+# Template generation utility (to be used by all modules)
 def generate_template(template_path, content, force=False):
-    """Generate a template file if it doesn't exist"""
+    """Generate a template file if it doesn't exist or force=True.
+    
+    Args:
+        template_path (str): Path where template should be saved
+        content (str): Template content
+        force (bool): If True, overwrite existing template
+    
+    Returns:
+        bool: True if template was created or updated, False otherwise
+    """
     try:
         if force or not os.path.exists(template_path):
             os.makedirs(os.path.dirname(template_path), exist_ok=True)
@@ -342,6 +169,349 @@ def generate_template(template_path, content, force=False):
         logger.error(f"Error generating template {template_path}: {e}")
         return False
 
+def detect_installed_features():
+    """Detect features available in the current environment"""
+    features = {}
+    
+    # Check for visualization dependencies
+    try:
+        import pandas
+        features['pandas'] = True
+        
+        try:
+            import numpy
+            features['numpy'] = True
+        except ImportError:
+            features['numpy'] = False
+            
+        try:
+            import plotly
+            features['plotly'] = True
+        except ImportError:
+            features['plotly'] = False
+    except ImportError:
+        features['pandas'] = False
+        features['numpy'] = False
+        features['plotly'] = False
+        
+    # Check for Google Cloud libraries
+    try:
+        import google.cloud.storage
+        features['gcp_storage'] = True
+    except ImportError:
+        features['gcp_storage'] = False
+        
+    try:
+        import google.cloud.compute_v1
+        features['gcp_compute'] = True
+    except ImportError:
+        features['gcp_compute'] = False
+        
+    try:
+        import google.cloud.pubsub_v1
+        features['gcp_pubsub'] = True
+    except ImportError:
+        features['gcp_pubsub'] = False
+    
+    # Check for stub modules
+    try:
+        import ssdeep
+        # Test if it's a real implementation
+        try:
+            test_hash = ssdeep.hash("test")
+            features['real_ssdeep'] = test_hash != "stub_hash"
+        except:
+            features['real_ssdeep'] = False
+    except ImportError:
+        features['real_ssdeep'] = False
+        
+    # Check scripts availability
+    scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
+    features['scripts_dir_exists'] = os.path.isdir(scripts_dir)
+    
+    if features['scripts_dir_exists']:
+        features['reporting_script'] = os.path.exists(os.path.join(scripts_dir, 'reporting.py'))
+        features['sanitizer_script'] = os.path.exists(os.path.join(scripts_dir, 'sanitizer.py'))
+        
+    logger.info(f"Feature detection completed: {features}")
+    return features
+
+def integrate_script(script_name):
+    """Safely import a script from the scripts directory
+    
+    Args:
+        script_name (str): Name of the script without .py extension
+        
+    Returns:
+        module or None: Imported module if successful, None otherwise
+    """
+    try:
+        # Check if script exists
+        script_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 
+            'scripts', 
+            f"{script_name}.py"
+        )
+        
+        if not os.path.exists(script_path):
+            logger.warning(f"Script {script_name}.py not found at {script_path}")
+            return None
+            
+        # Import the script
+        script_module = importlib.import_module(f"scripts.{script_name}")
+        logger.info(f"Successfully integrated script: {script_name}")
+        return script_module
+    except ImportError as e:
+        logger.warning(f"Could not import script {script_name}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error integrating script {script_name}: {e}")
+        return None
+
+def get_sanitizer():
+    """Get sanitizer module from scripts directory"""
+    return integrate_script("sanitizer")
+    
+def get_reporting():
+    """Get reporting module from scripts directory"""
+    return integrate_script("reporting")
+
+def register_health_check(app):
+    """Register a comprehensive health check endpoint
+    
+    Args:
+        app: Flask application instance
+    """
+    @app.route('/health')
+    def health_check():
+        """Comprehensive health check endpoint"""
+        # Get database health if possible
+        db_health = {"status": "unknown"}
+        try:
+            # Import function if available
+            from database import check_database_health
+            db_health = check_database_health()
+        except ImportError:
+            # Basic check if not available
+            try:
+                from database import get_db_connection
+                conn = get_db_connection()
+                conn.execute("SELECT 1")
+                conn.close()
+                db_health = {"status": "healthy"}
+            except Exception as e:
+                db_health = {"status": "unhealthy", "error": str(e)}
+        
+        # Build comprehensive health data
+        health_data = {
+            "status": "healthy",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "uptime_seconds": int(time.time() - app.config.get('START_TIME', 0)),
+            "components": {
+                "database": db_health,
+                "modules": module_status,
+                "features": detect_installed_features()
+            }
+        }
+        
+        # Determine overall health status
+        if db_health.get("status") != "healthy":
+            health_data["status"] = "degraded"
+            
+        for module, status in module_status.items():
+            if not status.get("initialized", False):
+                health_data["status"] = "degraded"
+                break
+        
+        return jsonify(health_data)
+
+def create_app(test_config=None):
+    """Create and configure the Flask application with robust error handling and fallbacks."""
+    # Record start time for uptime tracking
+    start_time = time.time()
+    
+    try:
+        # Create Flask app with explicit template and static folders
+        app = Flask(__name__, 
+                    static_folder='static',
+                    template_folder='templates')
+        
+        # Explicitly set the paths to avoid any path resolution issues
+        app.static_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+        app.template_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+        
+        # Load configuration
+        app.config.update({
+            'DATABASE_PATH': os.environ.get('DATABASE_PATH', '/app/data/malware_platform.db'),
+            'UPLOAD_FOLDER': os.environ.get('UPLOAD_FOLDER', '/app/data/uploads'),
+            'MAX_UPLOAD_SIZE_MB': int(os.environ.get('MAX_UPLOAD_SIZE_MB', 100)),
+            'DEBUG': os.environ.get('DEBUG', 'False').lower() in ('true', '1', 't'),
+            'APP_NAME': os.environ.get('APP_NAME', "Malware Detonation Platform"),
+            'GENERATE_TEMPLATES': os.environ.get('GENERATE_TEMPLATES', 'True').lower() in ('true', '1', 't'),
+            'INITIALIZE_GCP': os.environ.get('INITIALIZE_GCP', 'False').lower() in ('true', '1', 't'),
+            'SKIP_DB_INIT': os.environ.get('SKIP_DB_INIT', 'False').lower() in ('true', '1', 't'),
+            'START_TIME': start_time
+        })
+        
+        # Set MAX_CONTENT_LENGTH based on MAX_UPLOAD_SIZE_MB
+        app.config['MAX_CONTENT_LENGTH'] = app.config['MAX_UPLOAD_SIZE_MB'] * 1024 * 1024
+        
+        # Create required directories with better error handling
+        setup_dirs = [
+            os.path.dirname(app.config.get('DATABASE_PATH')),
+            app.config.get('UPLOAD_FOLDER'),
+            os.path.join(app.static_folder, 'css'),
+            os.path.join(app.static_folder, 'js'),
+            app.template_folder
+        ]
+        
+        for directory in setup_dirs:
+            try:
+                os.makedirs(directory, exist_ok=True)
+                logger.debug(f"Ensured directory exists: {directory}")
+            except Exception as e:
+                logger.error(f"Error creating directory {directory}: {e}")
+        
+        # Register direct root handler as fallback
+        app.add_url_rule('/', 'direct_root', direct_root_handler)
+        
+        # Register consolidated health check endpoint
+        register_health_check(app)
+        
+        # Set up request tracking for performance monitoring
+        @app.before_request
+        def before_request():
+            g.start_time = time.time()
+            
+        @app.after_request
+        def after_request(response):
+            if hasattr(g, 'start_time'):
+                duration = time.time() - g.start_time
+                response.headers['X-Request-Duration'] = str(duration)
+            return response
+        
+        # Ensure essential templates exist
+        if app.config.get('GENERATE_TEMPLATES', False):
+            ensure_index_template(app)
+        
+        # Initialize database with better error handling
+        try:
+            with app.app_context():
+                # Make sure database directory exists
+                db_dir = os.path.dirname(app.config.get('DATABASE_PATH'))
+                os.makedirs(db_dir, exist_ok=True)
+                
+                # Initialize database
+                from database import init_app as init_db
+                init_db(app)
+                logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Database initialization error: {e}")
+            logger.warning("Application will start but database functionality may be limited")
+        
+        # Initialize modules with comprehensive error handling
+        with app.app_context():
+            # First register web blueprint directly for root route handling
+            try:
+                from web_interface import web_bp
+                app.register_blueprint(web_bp)
+                logger.info("Direct web blueprint registration successful")
+            except Exception as e:
+                logger.error(f"Error directly registering web blueprint: {e}")
+                logger.warning("Web interface may not function properly - root route and UI features might be unavailable")
+            
+            # Now initialize modules in the defined order
+            for module_name in MODULE_INIT_ORDER:
+                try:
+                    module = get_module(module_name)
+                    if module and hasattr(module, 'init_app'):
+                        module.init_app(app)
+                        module_status[module_name]['initialized'] = True
+                        logger.info(f"Module {module_name} initialized successfully")
+                    else:
+                        logger.warning(f"Module {module_name} has no init_app function or could not be imported")
+                except Exception as e:
+                    logger.error(f"Error initializing module {module_name}: {e}")
+                    module_status[module_name]['error'] = str(e)
+                    logger.warning(f"Module {module_name} will not be available")
+        
+        # Update the direct routes if available
+        try:
+            from direct_routes import register_direct_routes
+            register_direct_routes(app)
+            logger.info("Registered additional direct routes")
+        except ImportError:
+            logger.debug("Direct routes module not available - skipping registration")
+        except Exception as e:
+            logger.error(f"Error registering direct routes: {e}")
+        
+        # Mark application as ready
+        try:
+            from app_ready import mark_app_ready
+            mark_app_ready()
+            logger.info("Application marked as ready")
+        except Exception as e:
+            logger.warning(f"Could not mark application as ready: {e}")
+        
+        logger.info(f"Application startup completed in {time.time() - start_time:.2f} seconds")
+        return app
+    except Exception as e:
+        # Catastrophic failure - create minimal emergency app
+        error_details = traceback.format_exc()
+        logger.critical(f"CRITICAL ERROR during app creation: {e}\n{error_details}")
+        
+        # Create a simplified fallback emergency application
+        emergency_app = Flask(__name__)
+        
+        @emergency_app.route('/')
+        def emergency_home():
+            return f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Malware Detonation Platform - Emergency Mode</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                    h1 {{ color: #dc3545; }}
+                    .error-card {{ background: #f8d7da; padding: 20px; border-radius: 8px; margin-top: 20px; }}
+                    .links {{ margin-top: 30px; }}
+                    .links a {{ display: inline-block; margin: 5px; padding: 8px 16px; color: white; 
+                              background-color: #4a6fa5; text-decoration: none; border-radius: 4px; }}
+                </style>
+            </head>
+            <body>
+                <h1>Malware Detonation Platform - Emergency Mode</h1>
+                <p>The application is running in emergency mode due to critical initialization errors.</p>
+                
+                <div class="error-card">
+                    <h2>Error Details</h2>
+                    <p>{str(e)}</p>
+                    <pre>{error_details}</pre>
+                </div>
+                
+                <div class="links">
+                    <p>The following links may not work properly:</p>
+                    <a href="/malware">Malware Analysis</a>
+                    <a href="/detonation">Detonation Service</a>
+                    <a href="/viz">Visualizations</a>
+                    <a href="/health">Health Check</a>
+                </div>
+            </body>
+            </html>
+            """
+            
+        @emergency_app.route('/health')
+        def emergency_health():
+            return jsonify({
+                "status": "critical",
+                "error": str(e),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            }), 500
+        
+        logger.info("Emergency application created as fallback")
+        return emergency_app
+
 if __name__ == "__main__":
     app = create_app()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=app.config.get('DEBUG', False))
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=app.config.get('DEBUG', False))
