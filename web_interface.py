@@ -4,11 +4,11 @@ import sqlite3, json, os, datetime, logging, traceback
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 
-# Set up logger first
+# Configure logging
 logger = logging.getLogger(__name__)
 
-# Create blueprint with EMPTY url_prefix - CRITICAL FIX
-web_bp = Blueprint('web', __name__, url_prefix='')
+# Create blueprint - Root path is handled by this blueprint
+web_bp = Blueprint('web', __name__)
 login_manager = LoginManager()
 
 class User(UserMixin):
@@ -21,10 +21,8 @@ def init_app(app):
     """Initialize web interface module with Flask app"""
     # Register blueprint first to avoid initialization issues
     try:
-        # CRITICAL FIX: Explicitly set url_prefix to None (not '')
-        web_bp.url_prefix = None
-        app.register_blueprint(web_bp, url_prefix=None)
-        logger.info("Web interface blueprint registered successfully with empty URL prefix")
+        app.register_blueprint(web_bp)
+        logger.info("Web interface blueprint registered successfully")
     except Exception as e:
         logger.error(f"Failed to register web interface blueprint: {e}")
         raise
@@ -33,7 +31,6 @@ def init_app(app):
     try:
         # Set up exception handling
         app.errorhandler(500)(handle_server_error)
-        app.errorhandler(404)(handle_not_found)
         app.errorhandler(Exception)(handle_exception)
         
         # Setup login manager
@@ -55,7 +52,6 @@ def init_app(app):
             # Generate templates
             generate_base_templates()
             
-            # Let main.py handle the root route
             logger.info("Web interface module initialized successfully")
         
     except Exception as e:
@@ -76,35 +72,6 @@ def handle_server_error(e):
         return render_template('error.html', 
                               error_code=500,
                               error_message="The server encountered an internal error. Please try again later."), 500
-
-def handle_not_found(e):
-    """Handle 404 errors gracefully"""
-    logger.warning(f"404 error: {request.path} not found")
-    try:
-        return render_template('error.html',
-                            error_code=404,
-                            error_message="The requested page was not found."), 404
-    except Exception as template_error:
-        logger.error(f"Error rendering 404 template: {template_error}")
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Not Found</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
-                h1 {{ color: #dc3545; }}
-                a {{ color: #4a6fa5; text-decoration: none; }}
-                a:hover {{ text-decoration: underline; }}
-            </style>
-        </head>
-        <body>
-            <h1>404 - Page Not Found</h1>
-            <p>The requested URL {request.path} was not found on this server.</p>
-            <p><a href="/">Return to Home</a></p>
-        </body>
-        </html>
-        """, 404
 
 def handle_exception(e):
     """Handle uncaught exceptions"""
@@ -234,62 +201,31 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# IMPORTANT: Root route handler properly decorated
+# Root route handler - Main entry point for the application
 @web_bp.route('/')
 def index():
     """Home page"""
     logger.info("Web blueprint index route handler called")
     try:
-        # Check if templates exist
+        # Verify templates exist and are valid
         template_dir = current_app.template_folder
         if not os.path.isabs(template_dir):
             template_dir = os.path.join(current_app.root_path, template_dir)
             
+        # Check if needed templates exist
         base_exists = os.path.exists(os.path.join(template_dir, 'base.html'))
         index_exists = os.path.exists(os.path.join(template_dir, 'index.html'))
         
-        logger.info(f"Template directory: {template_dir}, base.html exists: {base_exists}, index.html exists: {index_exists}")
+        logger.info(f"Template check: base.html exists: {base_exists}, index.html exists: {index_exists}")
         
         # Try to create templates if they don't exist
         if not (base_exists and index_exists):
-            logger.warning("Templates missing, attempting to recreate them")
-            try:
-                from main import ensure_index_template
-                ensure_index_template(current_app)
-            except ImportError:
-                # If main's ensure_index_template is unavailable, use local fallback
-                generate_base_templates()
-            
-            # Double check they were created
-            base_exists = os.path.exists(os.path.join(template_dir, 'base.html'))
-            index_exists = os.path.exists(os.path.join(template_dir, 'index.html'))
-            
-            # If still not created, generate them directly
-            if not (base_exists and index_exists):
-                generate_base_templates()
-        
-        # Read the content to verify it's not empty/truncated
-        try:
-            with open(os.path.join(template_dir, 'base.html'), 'r') as f:
-                base_content = f.read()
-            with open(os.path.join(template_dir, 'index.html'), 'r') as f:
-                index_content = f.read()
-                
-            # Check for minimal content
-            if len(base_content) < 100 or len(index_content) < 100:
-                logger.warning(f"Templates exist but appear to be truncated: base.html ({len(base_content)} bytes), index.html ({len(index_content)} bytes)")
-                # Regenerate them
-                generate_base_templates()
-        except Exception as e:
-            logger.error(f"Error reading template files: {e}")
-            # Regenerate them if there's an error
+            logger.warning("Templates missing, generating them")
             generate_base_templates()
         
         # Render the template
-        logger.info("Attempting to render index.html template")
-        response = render_template('index.html')
-        logger.info(f"Successfully rendered index.html (length: {len(response)})")
-        return response
+        logger.info("Rendering index.html template")
+        return render_template('index.html')
     except Exception as e:
         error_details = traceback.format_exc()
         logger.error(f"Error rendering index page: {str(e)}\nTraceback: {error_details}")
@@ -681,8 +617,6 @@ def diagnostic():
 def recreate_templates():
     """Recreate basic templates endpoint"""
     try:
-        from main import ensure_index_template
-        ensure_index_template(current_app)
         generate_base_templates()
         return jsonify({"success": True, "message": "Templates recreated successfully"})
     except Exception as e:
@@ -859,6 +793,47 @@ def generate_base_templates():
                 <h5 class="card-title">Diagnostics</h5>
                 <p class="card-text">Check system status and troubleshoot issues.</p>
                 <a href="{{ url_for('web.diagnostic') }}" class="btn btn-outline-primary">System Diagnostics</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}""",
+
+        'login.html': """{% extends 'base.html' %}
+
+{% block title %}Login - {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h3 class="card-title mb-0">Login</h3>
+            </div>
+            <div class="card-body">
+                {% if error %}
+                <div class="alert alert-danger">{{ error }}</div>
+                {% endif %}
+                
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="username" class="form-label">Username</label>
+                        <input type="text" class="form-control" id="username" name="username" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="password" class="form-label">Password</label>
+                        <input type="password" class="form-control" id="password" name="password" required>
+                    </div>
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="remember" name="remember">
+                        <label class="form-check-label" for="remember">Remember me</label>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Login</button>
+                </form>
+                
+                <div class="mt-4">
+                    <small class="text-muted">Default credentials: admin / admin123</small>
+                </div>
             </div>
         </div>
     </div>
