@@ -98,7 +98,7 @@ RUN echo "from flask import Blueprint, render_template_string, redirect, url_for
     echo "    app.register_blueprint(direct_bp)" >> /app/direct_routes.py && \
     echo "    print('Direct routes registered successfully')" >> /app/direct_routes.py
 
-# Create web blueprint URL prefix fixer - FIXED SYNTAX ERROR HERE
+# Create web blueprint URL prefix fixer - FIXED THE SYNTAX ERROR
 RUN echo "#!/usr/bin/env python3" > /app/fix_blueprint.py && \
     echo "import os, sys, re" >> /app/fix_blueprint.py && \
     echo "" >> /app/fix_blueprint.py && \
