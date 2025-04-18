@@ -683,7 +683,7 @@ def create_app(test_config=None):
             logger.error(f"Database initialization error: {e}")
             logger.warning("Application will start but database functionality may be limited")
         
-        # Initialize modules with comprehensive error handling
+        # CRITICAL CHANGE: Initialize modules in a different order, with web blueprint first
         with app.app_context():
             # First register web blueprint directly for root route handling
             try:
@@ -692,12 +692,18 @@ def create_app(test_config=None):
                 web_bp.url_prefix = None  # Explicitly set to None, not empty string
                 app.register_blueprint(web_bp, url_prefix=None)  # Use None to avoid any Flask string concatenation issues
                 logger.info("Direct web blueprint registration successful")
+                module_status['web']['initialized'] = True
             except Exception as e:
                 logger.error(f"Error directly registering web blueprint: {e}")
                 logger.warning("Web interface may not function properly - root route and UI features might be unavailable")
+                module_status['web']['error'] = str(e)
             
-            # Now initialize modules in the defined order
+            # Now initialize other modules in the defined order
             for module_name in MODULE_INIT_ORDER:
+                # Skip web as we already initialized it
+                if module_name == 'web':
+                    continue
+                    
                 try:
                     module = get_module(module_name)
                     if module and hasattr(module, 'init_app'):
@@ -711,19 +717,7 @@ def create_app(test_config=None):
                     module_status[module_name]['error'] = str(e)
                     logger.warning(f"Module {module_name} will not be available")
         
-        # Add a catch-all route to handle any unknown routes
-        @app.route('/<path:path>')
-        def catch_all(path):
-            logger.warning(f"Catch-all route handling unknown path: /{path}")
-            # First try to find a module that might handle this path
-            for prefix in ['malware', 'detonation', 'viz']:
-                if path.startswith(prefix):
-                    return redirect(f"/{path}")
-            
-            # If no module matches, show a 404 page
-            return handle_not_found(None)
-        
-        # ADDITIONAL PROTECTION: Add a permanent redirect for any potential variations of the root URL
+        # Add alternate routes for the root path to handle edge cases
         @app.route('/index')
         @app.route('/home')
         @app.route('/start')
