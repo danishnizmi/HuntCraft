@@ -1,56 +1,99 @@
 from flask import Blueprint, request, render_template, current_app, jsonify, flash, redirect, url_for
 import sqlite3, json, time, logging, uuid, os, threading
 from datetime import datetime
-from google.cloud import compute_v1, storage, pubsub_v1
 
-# Blueprint and logging setup
-detonation_bp = Blueprint('detonation', __name__, url_prefix='/detonation')
+# Set up logger first to capture import errors
 logger = logging.getLogger(__name__)
-active_jobs = {}  # Global jobs tracker
+
+# Create blueprint immediately
+detonation_bp = Blueprint('detonation', __name__, url_prefix='/detonation')
+
+# Try to import Google Cloud dependencies with better error handling
+GCP_ENABLED = True
+try:
+    from google.cloud import compute_v1, storage, pubsub_v1
+except ImportError:
+    GCP_ENABLED = False
+    logger.warning("Google Cloud dependencies not available. Some detonation features will be limited.")
+
+# Global jobs tracker
+active_jobs = {}
 
 def init_app(app):
     """Initialize module with Flask app"""
-    app.register_blueprint(detonation_bp)
-    with app.app_context():
-        os.makedirs('static/css', exist_ok=True)
-        os.makedirs('static/js', exist_ok=True)
-        os.makedirs('templates', exist_ok=True)
-        generate_templates()
-        
-        # Set up Pub/Sub if running in production
-        if app.config.get('ON_CLOUD_RUN', False):
-            ensure_pubsub_topic()
-            setup_pubsub_subscription()
+    # Register blueprint first to avoid initialization issues
+    try:
+        app.register_blueprint(detonation_bp)
+        logger.info("Detonation blueprint registered successfully")
+    except Exception as e:
+        logger.error(f"Failed to register detonation blueprint: {e}")
+        raise
+    
+    # Continue with other initialization in a safer way
+    try:
+        with app.app_context():
+            # Create directories
+            os.makedirs('static/css', exist_ok=True)
+            os.makedirs('static/js', exist_ok=True)
+            os.makedirs('templates', exist_ok=True)
+            
+            # Generate templates
+            generate_templates()
+            
+            # Set up Pub/Sub if running in production and GCP is available
+            if app.config.get('ON_CLOUD_RUN', False) and GCP_ENABLED:
+                ensure_pubsub_topic()
+                setup_pubsub_subscription()
+            
+        logger.info("Detonation module initialized successfully")
+    except Exception as e:
+        logger.error(f"Error in detonation module initialization: {e}")
+        # Don't re-raise to allow app to start with limited functionality
 
 def create_database_schema(cursor):
     """Create database tables"""
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS detonation_jobs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, job_uuid TEXT NOT NULL,
-        sample_id INTEGER NOT NULL, vm_type TEXT NOT NULL, vm_name TEXT,
-        status TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        started_at TEXT, completed_at TEXT, error_message TEXT,
-        results_path TEXT, user_id INTEGER,
-        FOREIGN KEY (sample_id) REFERENCES malware_samples(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
-    )''')
-    
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS detonation_results (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL,
-        result_type TEXT NOT NULL, result_data TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (job_id) REFERENCES detonation_jobs(id)
-    )''')
+    try:
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS detonation_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, job_uuid TEXT NOT NULL,
+            sample_id INTEGER NOT NULL, vm_type TEXT NOT NULL, vm_name TEXT,
+            status TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TEXT, completed_at TEXT, error_message TEXT,
+            results_path TEXT, user_id INTEGER,
+            FOREIGN KEY (sample_id) REFERENCES malware_samples(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS detonation_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL,
+            result_type TEXT NOT NULL, result_data TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_id) REFERENCES detonation_jobs(id)
+        )''')
+        
+        logger.info("Detonation database schema created successfully")
+    except Exception as e:
+        logger.error(f"Error creating detonation database schema: {e}")
+        raise
 
 def _db_connection(row_factory=None):
     """Create a database connection with optional row factory"""
-    conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
-    if row_factory: conn.row_factory = row_factory
-    return conn
+    try:
+        conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
+        if row_factory: 
+            conn.row_factory = row_factory
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise
 
 def ensure_pubsub_topic():
     """Ensure the Pub/Sub topic for detonation notifications exists"""
+    if not GCP_ENABLED:
+        logger.warning("GCP dependencies not available. Pub/Sub features disabled.")
+        return
+        
     try:
         project_id = current_app.config['GCP_PROJECT_ID']
         if not project_id:
@@ -71,6 +114,10 @@ def ensure_pubsub_topic():
 
 def setup_pubsub_subscription():
     """Set up Pub/Sub subscription for job updates"""
+    if not GCP_ENABLED:
+        logger.warning("GCP dependencies not available. Pub/Sub features disabled.")
+        return
+        
     try:
         project_id = current_app.config['GCP_PROJECT_ID']
         if not project_id:
@@ -118,8 +165,13 @@ def setup_pubsub_subscription():
 @detonation_bp.route('/')
 def index():
     """Main page - list all detonation jobs"""
-    jobs = get_detonation_jobs()
-    return render_template('detonation_index.html', jobs=jobs, active_vm_count=len(active_jobs))
+    try:
+        jobs = get_detonation_jobs()
+        return render_template('detonation_index.html', jobs=jobs, active_vm_count=len(active_jobs))
+    except Exception as e:
+        logger.error(f"Error in detonation index: {e}")
+        flash(f"Error loading detonation jobs: {str(e)}", "error")
+        return render_template('detonation_index.html', jobs=[], active_vm_count=0)
 
 @detonation_bp.route('/create', methods=['GET', 'POST'])
 def create():
@@ -129,10 +181,21 @@ def create():
         flash('No malware sample specified', 'error')
         return redirect(url_for('malware.index'))
     
-    from malware_module import get_malware_by_id
-    sample = get_malware_by_id(sample_id)
-    if not sample:
-        flash('Malware sample not found', 'error')
+    try:
+        from main import get_module
+        malware_module = get_module('malware')
+        if malware_module:
+            sample = malware_module.get_malware_by_id(sample_id)
+        else:
+            flash('Malware module not available', 'error')
+            return redirect(url_for('malware.index'))
+            
+        if not sample:
+            flash('Malware sample not found', 'error')
+            return redirect(url_for('malware.index'))
+    except Exception as e:
+        logger.error(f"Error loading malware sample: {e}")
+        flash('Error loading malware sample', 'error')
         return redirect(url_for('malware.index'))
     
     if request.method == 'POST':
@@ -142,37 +205,54 @@ def create():
             flash('Detonation job created successfully. VM deployment in progress...', 'success')
             return redirect(url_for('detonation.view', job_id=job_id))
         except Exception as e:
+            logger.error(f"Error creating detonation job: {e}")
             flash(f'Error creating detonation job: {str(e)}', 'error')
             return redirect(url_for('detonation.create', sample_id=sample_id))
     
+    # GET request - show upload form
     return render_template('detonation_create.html', sample=sample)
 
 @detonation_bp.route('/view/<int:job_id>')
 def view(job_id):
     """View detonation job and results"""
-    job = get_job_by_id(job_id)
-    if not job:
-        flash('Detonation job not found', 'error')
+    try:
+        job = get_job_by_id(job_id)
+        if not job:
+            flash('Detonation job not found', 'error')
+            return redirect(url_for('detonation.index'))
+        
+        from main import get_module
+        malware_module = get_module('malware')
+        if malware_module:
+            sample = malware_module.get_malware_by_id(job['sample_id'])
+        else:
+            flash('Malware module not available', 'error')
+            return redirect(url_for('detonation.index'))
+        
+        results = get_job_results(job_id) if job['status'] == 'completed' else []
+        
+        return render_template('detonation_view.html', 
+                              job=job, 
+                              sample=sample, 
+                              results=results)
+    except Exception as e:
+        logger.error(f"Error viewing detonation job {job_id}: {e}")
+        flash(f'Error viewing detonation job: {str(e)}', 'error')
         return redirect(url_for('detonation.index'))
-    
-    from malware_module import get_malware_by_id
-    sample = get_malware_by_id(job['sample_id'])
-    results = get_job_results(job_id) if job['status'] == 'completed' else []
-    
-    return render_template('detonation_view.html', job=job, sample=sample, results=results)
 
 @detonation_bp.route('/cancel/<int:job_id>', methods=['POST'])
 def cancel(job_id):
     """Cancel a running detonation job"""
-    job = get_job_by_id(job_id)
-    if not job or job['status'] not in ['queued', 'deploying', 'running']:
-        flash('Cannot cancel this job', 'error')
-        return redirect(url_for('detonation.view', job_id=job_id) if job else url_for('detonation.index'))
-    
     try:
+        job = get_job_by_id(job_id)
+        if not job or job['status'] not in ['queued', 'deploying', 'running']:
+            flash('Cannot cancel this job', 'error')
+            return redirect(url_for('detonation.view', job_id=job_id) if job else url_for('detonation.index'))
+        
         success = cancel_detonation_job(job_id)
         flash('Job cancelled successfully' if success else 'Error cancelling job', 'success' if success else 'error')
     except Exception as e:
+        logger.error(f"Error cancelling job {job_id}: {e}")
         flash(f'Error: {str(e)}', 'error')
     
     return redirect(url_for('detonation.view', job_id=job_id))
@@ -180,28 +260,39 @@ def cancel(job_id):
 @detonation_bp.route('/delete/<int:job_id>', methods=['POST'])
 def delete(job_id):
     """Delete a detonation job and its results"""
-    success = delete_detonation_job(job_id)
-    flash('Job deleted successfully' if success else 'Error deleting job', 'success' if success else 'error')
+    try:
+        success = delete_detonation_job(job_id)
+        flash('Job deleted successfully' if success else 'Error deleting job', 'success' if success else 'error')
+    except Exception as e:
+        logger.error(f"Error deleting job {job_id}: {e}")
+        flash(f'Error deleting job: {str(e)}', 'error')
     return redirect(url_for('detonation.index'))
 
 @detonation_bp.route('/api/status/<int:job_id>')
 def api_status(job_id):
     """API endpoint to get job status"""
-    job = get_job_by_id(job_id)
-    if not job:
-        return jsonify({'error': 'Job not found'}), 404
-    
-    return jsonify({
-        'job_id': job_id,
-        'status': job['status'],
-        'started_at': job['started_at'],
-        'completed_at': job['completed_at'],
-        'error_message': job['error_message']
-    })
+    try:
+        job = get_job_by_id(job_id)
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        return jsonify({
+            'job_id': job_id,
+            'status': job['status'],
+            'started_at': job['started_at'],
+            'completed_at': job['completed_at'],
+            'error_message': job['error_message']
+        })
+    except Exception as e:
+        logger.error(f"Error in API status for job {job_id}: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # Core Detonation Logic
 def create_detonation_job(sample_id, vm_type):
     """Create a new detonation job and start VM deployment via GCP"""
+    if not GCP_ENABLED:
+        raise ValueError("GCP functionality is disabled. Cannot create detonation job.")
+        
     # Check if maximum concurrent detonations reached
     max_concurrent = current_app.config.get('MAX_CONCURRENT_DETONATIONS', 5)
     if len(active_jobs) >= max_concurrent:
@@ -231,9 +322,13 @@ def create_detonation_job(sample_id, vm_type):
     
     # Start VM deployment using instance template
     try:
-        from malware_module import get_malware_by_id
-        sample = get_malware_by_id(sample_id)
-        deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type)
+        from main import get_module
+        malware_module = get_module('malware')
+        if malware_module:
+            sample = malware_module.get_malware_by_id(sample_id)
+            deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type)
+        else:
+            raise ValueError("Malware module not available")
     except Exception as e:
         update_job_status(job_id, 'failed', error_message=str(e))
         if job_id in active_jobs:
@@ -244,6 +339,9 @@ def create_detonation_job(sample_id, vm_type):
 
 def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
     """Deploy a GCP VM for malware detonation with improved reliability"""
+    if not GCP_ENABLED:
+        raise ValueError("GCP functionality is disabled. Cannot deploy VM.")
+        
     project_id = current_app.config['GCP_PROJECT_ID']
     zone = current_app.config['GCP_ZONE']
     
@@ -361,6 +459,10 @@ echo "Shutdown cleanup complete at $(date)"
 
 def setup_job_monitoring(job_id, vm_name):
     """Configure monitoring for the detonation job using Pub/Sub"""
+    if not GCP_ENABLED:
+        logger.warning(f"GCP functionality is disabled. Skipping job monitoring setup for job {job_id}.")
+        return
+        
     project_id = current_app.config['GCP_PROJECT_ID']
     
     # Create a Pub/Sub publisher
@@ -368,15 +470,18 @@ def setup_job_monitoring(job_id, vm_name):
     topic_path = publisher.topic_path(project_id, 'detonation-notifications')
     
     # Publish a monitoring setup message
-    message_data = json.dumps({
-        'action': 'monitor',
-        'job_id': job_id,
-        'vm_name': vm_name,
-        'timestamp': datetime.now().isoformat()
-    }).encode('utf-8')
-    
-    publisher.publish(topic_path, data=message_data)
-    logger.info(f"Set up monitoring for job {job_id}")
+    try:
+        message_data = json.dumps({
+            'action': 'monitor',
+            'job_id': job_id,
+            'vm_name': vm_name,
+            'timestamp': datetime.now().isoformat()
+        }).encode('utf-8')
+        
+        publisher.publish(topic_path, data=message_data)
+        logger.info(f"Set up monitoring for job {job_id}")
+    except Exception as e:
+        logger.error(f"Error setting up job monitoring: {e}")
 
 def schedule_cleanup(job_id, vm_name, timeout_minutes=60):
     """Schedule automatic cleanup of a VM after timeout period"""
@@ -389,16 +494,17 @@ def schedule_cleanup(job_id, vm_name, timeout_minutes=60):
             logger.warning(f"Job {job_id} (VM {vm_name}) timed out after {timeout_minutes} minutes")
             
             try:
-                # Force VM deletion
-                project_id = current_app.config['GCP_PROJECT_ID']
-                zone = current_app.config['GCP_ZONE']
-                
-                instance_client = compute_v1.InstancesClient()
-                instance_client.delete(
-                    project=project_id,
-                    zone=zone,
-                    instance=vm_name
-                )
+                # Force VM deletion if GCP is enabled
+                if GCP_ENABLED:
+                    project_id = current_app.config['GCP_PROJECT_ID']
+                    zone = current_app.config['GCP_ZONE']
+                    
+                    instance_client = compute_v1.InstancesClient()
+                    instance_client.delete(
+                        project=project_id,
+                        zone=zone,
+                        instance=vm_name
+                    )
                 
                 # Update job status to timed out
                 update_job_status(job_id, 'failed', 
@@ -452,7 +558,7 @@ def update_job_status(job_id, status, started_at=None, completed_at=None, error_
         logger.info(f"Updated job {job_id} status to {status}")
         
         # If job completed or failed, notify via Pub/Sub
-        if status in ['completed', 'failed', 'cancelled']:
+        if status in ['completed', 'failed', 'cancelled'] and GCP_ENABLED:
             notify_job_completed(job_id, status)
             
     except Exception as e:
@@ -463,6 +569,10 @@ def update_job_status(job_id, status, started_at=None, completed_at=None, error_
 
 def notify_job_completed(job_id, status):
     """Notify job completion via Pub/Sub"""
+    if not GCP_ENABLED:
+        logger.warning(f"GCP functionality is disabled. Skipping completion notification for job {job_id}.")
+        return
+        
     try:
         project_id = current_app.config['GCP_PROJECT_ID']
         publisher = pubsub_v1.PublisherClient()
@@ -524,6 +634,10 @@ def handle_job_update(message):
 
 def process_detonation_results(job_id, results_path):
     """Process and store detonation results with enhanced error handling"""
+    if not GCP_ENABLED:
+        logger.warning(f"GCP functionality is disabled. Skipping results processing for job {job_id}.")
+        return
+        
     try:
         # Get the results from GCS
         storage_client = storage.Client()
@@ -576,8 +690,10 @@ def process_detonation_results(job_id, results_path):
             # Generate visualization data if configured
             if current_app.config.get('ENABLE_VISUALIZATION', True):
                 try:
-                    from viz_module import create_visualization_from_data
-                    create_visualization_from_data(job_id, summary_data)
+                    from main import get_module
+                    viz_module = get_module('viz')
+                    if viz_module and hasattr(viz_module, 'create_visualization_from_data'):
+                        viz_module.create_visualization_from_data(job_id, summary_data)
                 except Exception as viz_error:
                     logger.error(f"Visualization generation error: {viz_error}")
         else:
@@ -604,6 +720,9 @@ def record_error_result(job_id, error_message):
 
 def extract_artifacts_from_results(bucket, results_path):
     """Extract important artifacts from detonation results"""
+    if not GCP_ENABLED:
+        return {}
+        
     artifacts = {}
     
     # Check for common artifact files
@@ -628,8 +747,8 @@ def cancel_detonation_job(job_id):
     if not job:
         return False
     
-    # Delete VM if it exists
-    if job['vm_name']:
+    # Delete VM if it exists and GCP is enabled
+    if job['vm_name'] and GCP_ENABLED:
         try:
             project_id = current_app.config['GCP_PROJECT_ID']
             zone = current_app.config['GCP_ZONE']
@@ -666,8 +785,8 @@ def delete_detonation_job(job_id):
     if job['status'] in ['queued', 'deploying', 'running']:
         cancel_detonation_job(job_id)
     
-    # Delete results from GCS
-    if job['results_path'] or job['job_uuid']:
+    # Delete results from GCS if GCP is enabled
+    if (job['results_path'] or job['job_uuid']) and GCP_ENABLED:
         try:
             storage_client = storage.Client()
             bucket = storage_client.bucket(current_app.config['GCP_RESULTS_BUCKET'])
@@ -700,76 +819,96 @@ def delete_detonation_job(job_id):
 # Database retrieval operations
 def get_detonation_jobs():
     """Get a list of all detonation jobs"""
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT j.*, s.name as sample_name, s.sha256 as sample_sha256
-        FROM detonation_jobs j
-        JOIN malware_samples s ON j.sample_id = s.id
-        ORDER BY j.created_at DESC
-    """)
-    jobs = [dict(row) for row in cursor.fetchall()]
-    
-    conn.close()
-    return jobs
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT j.*, s.name as sample_name, s.sha256 as sample_sha256
+            FROM detonation_jobs j
+            JOIN malware_samples s ON j.sample_id = s.id
+            ORDER BY j.created_at DESC
+        """)
+        jobs = [dict(row) for row in cursor.fetchall()]
+        
+        conn.close()
+        return jobs
+    except Exception as e:
+        logger.error(f"Error getting detonation jobs: {e}")
+        return []
 
 def get_job_by_id(job_id):
     """Get job information by ID"""
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT j.*, s.name as sample_name, s.sha256 as sample_sha256
-        FROM detonation_jobs j
-        JOIN malware_samples s ON j.sample_id = s.id
-        WHERE j.id = ?
-    """, (job_id,))
-    job = cursor.fetchone()
-    
-    conn.close()
-    return dict(job) if job else None
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT j.*, s.name as sample_name, s.sha256 as sample_sha256
+            FROM detonation_jobs j
+            JOIN malware_samples s ON j.sample_id = s.id
+            WHERE j.id = ?
+        """, (job_id,))
+        job = cursor.fetchone()
+        
+        conn.close()
+        return dict(job) if job else None
+    except Exception as e:
+        logger.error(f"Error getting job by ID: {e}")
+        return None
 
 def get_job_uuid(job_id):
     """Get the UUID for a job"""
-    conn = _db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT job_uuid FROM detonation_jobs WHERE id = ?", (job_id,))
-    row = cursor.fetchone()
-    
-    conn.close()
-    return row[0] if row else None
+    try:
+        conn = _db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT job_uuid FROM detonation_jobs WHERE id = ?", (job_id,))
+        row = cursor.fetchone()
+        
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error(f"Error getting job UUID: {e}")
+        return None
 
 def get_job_results(job_id):
     """Get results for a specific job"""
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM detonation_results WHERE job_id = ?", (job_id,))
-    results = [dict(row) for row in cursor.fetchall()]
-    
-    # Parse JSON result data
-    for result in results:
-        if result['result_data']:
-            try:
-                result['result_data'] = json.loads(result['result_data'])
-            except:
-                pass
-    
-    conn.close()
-    return results
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM detonation_results WHERE job_id = ?", (job_id,))
+        results = [dict(row) for row in cursor.fetchall()]
+        
+        # Parse JSON result data
+        for result in results:
+            if result['result_data']:
+                try:
+                    result['result_data'] = json.loads(result['result_data'])
+                except:
+                    pass
+        
+        conn.close()
+        return results
+    except Exception as e:
+        logger.error(f"Error getting job results: {e}")
+        return []
 
 def get_jobs_for_sample(sample_id):
     """Get detonation jobs for a specific malware sample"""
-    conn = _db_connection(sqlite3.Row)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM detonation_jobs WHERE sample_id = ? ORDER BY created_at DESC", (sample_id,))
-    jobs = [dict(row) for row in cursor.fetchall()]
-    
-    conn.close()
-    return jobs
+    try:
+        conn = _db_connection(sqlite3.Row)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM detonation_jobs WHERE sample_id = ? ORDER BY created_at DESC", (sample_id,))
+        jobs = [dict(row) for row in cursor.fetchall()]
+        
+        conn.close()
+        return jobs
+    except Exception as e:
+        logger.error(f"Error getting jobs for sample: {e}")
+        return []
 
 # Template generation
 def generate_templates():
@@ -1195,8 +1334,11 @@ def generate_templates():
     }
     
     # Create templates if they don't exist
-    for filename, content in templates.items():
-        if not os.path.exists(f'templates/{filename}'):
-            with open(f'templates/{filename}', 'w') as f:
-                f.write(content)
-            logger.info(f"Created template: {filename}")
+    try:
+        for filename, content in templates.items():
+            if not os.path.exists(f'templates/{filename}'):
+                with open(f'templates/{filename}', 'w') as f:
+                    f.write(content)
+                logger.info(f"Created template: {filename}")
+    except Exception as e:
+        logger.error(f"Error generating templates: {e}")
