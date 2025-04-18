@@ -30,57 +30,50 @@ steps:
           echo "Service account malware-platform-sa already exists"
         fi
         
-        # Grant IAM roles individually with --condition=None flag
+        # Grant IAM roles individually without --condition flag
         echo "Granting roles to service account..."
         
         # Storage Admin role
         echo "Granting Storage Admin role..."
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/storage.admin" \
-          --condition=None > /dev/null 2>&1 || echo "Role binding for Storage Admin failed or already exists"
+          --role="roles/storage.admin" > /dev/null 2>&1 || echo "Role binding for Storage Admin failed or already exists"
         
         # Pub/Sub Publisher role
         echo "Granting Pub/Sub Publisher role..."
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/pubsub.publisher" \
-          --condition=None > /dev/null 2>&1 || echo "Role binding for Pub/Sub Publisher failed or already exists"
+          --role="roles/pubsub.publisher" > /dev/null 2>&1 || echo "Role binding for Pub/Sub Publisher failed or already exists"
         
         # Pub/Sub Subscriber role
         echo "Granting Pub/Sub Subscriber role..."
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/pubsub.subscriber" \
-          --condition=None > /dev/null 2>&1 || echo "Role binding for Pub/Sub Subscriber failed or already exists"
+          --role="roles/pubsub.subscriber" > /dev/null 2>&1 || echo "Role binding for Pub/Sub Subscriber failed or already exists"
         
         # Logs Writer role
         echo "Granting Logs Writer role..."
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/logging.logWriter" \
-          --condition=None > /dev/null 2>&1 || echo "Role binding for Logs Writer failed or already exists"
+          --role="roles/logging.logWriter" > /dev/null 2>&1 || echo "Role binding for Logs Writer failed or already exists"
         
         # Cloud Run Admin role
         echo "Granting Cloud Run Admin role..."
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/run.admin" \
-          --condition=None > /dev/null 2>&1 || echo "Role binding for Cloud Run Admin failed or already exists"
+          --role="roles/run.admin" > /dev/null 2>&1 || echo "Role binding for Cloud Run Admin failed or already exists"
         
         # Compute Admin role
         echo "Granting Compute Admin role..."
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/compute.admin" \
-          --condition=None > /dev/null 2>&1 || echo "Role binding for Compute Admin failed or already exists"
+          --role="roles/compute.admin" > /dev/null 2>&1 || echo "Role binding for Compute Admin failed or already exists"
         
         # Secret Manager Secret Accessor role
         echo "Granting Secret Manager Secret Accessor role..."
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/secretmanager.secretAccessor" \
-          --condition=None > /dev/null 2>&1 || echo "Role binding for Secret Manager Secret Accessor failed or already exists"
+          --role="roles/secretmanager.secretAccessor" > /dev/null 2>&1 || echo "Role binding for Secret Manager Secret Accessor failed or already exists"
         
         echo "Infrastructure setup complete"
 
@@ -110,10 +103,12 @@ steps:
           exit 1
         fi
         
-        # Process the cloudrun.yaml file to ensure $PROJECT_ID is properly substituted
+        # Process the cloudrun.yaml file with necessary substitutions and fix for fieldRef
         cat cloudrun.yaml | \
         sed "s/\$PROJECT_ID/$PROJECT_ID/g" | \
-        sed "s/\$COMMIT_SHA/$COMMIT_SHA/g" > processed_cloudrun.yaml
+        sed "s/\$COMMIT_SHA/$COMMIT_SHA/g" | \
+        # Fix the fieldRef in env var to use proper metadata.annotations format
+        sed "s/fieldRef:/value: \"${_REGION}\"/g" > processed_cloudrun.yaml
         
         echo "Substitutions applied to cloudrun.yaml"
         
@@ -123,13 +118,12 @@ steps:
           --platform=managed \
           --region=${_REGION}
         
-        # Allow public access if needed
+        # Allow public access if needed - fixed command without --condition flag
         echo "Configuring public access..."
         gcloud run services add-iam-policy-binding malware-detonation-platform \
           --member="allUsers" \
           --role="roles/run.invoker" \
-          --region=${_REGION} \
-          --condition=None
+          --region=${_REGION}
           
         echo "Deployment to Cloud Run complete"
 
