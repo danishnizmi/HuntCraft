@@ -98,10 +98,9 @@ RUN echo "from flask import Blueprint, render_template_string, redirect, url_for
     echo "    app.register_blueprint(direct_bp)" >> /app/direct_routes.py && \
     echo "    print('Direct routes registered successfully')" >> /app/direct_routes.py
 
-# Create essential templates
-COPY templates/index.html /app/templates/index.html
-COPY templates/base.html /app/templates/base.html
-COPY templates/error.html /app/templates/error.html
+# Create template directory rather than copying templates that might not exist
+# The application will generate templates at runtime if needed
+RUN mkdir -p /app/templates
 
 # Create web blueprint URL prefix fixer - simplified approach
 RUN echo "#!/usr/bin/env python3" > /app/fix_blueprint.py && \
