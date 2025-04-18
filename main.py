@@ -42,39 +42,6 @@ def get_module(module_name):
         module_status[module_name]['error'] = str(e)
         return None
 
-def direct_root_handler():
-    """Direct root handler for fallback."""
-    logger.info("Direct root handler called")
-    try:
-        return render_template('index.html')
-    except Exception as e:
-        logger.error(f"Error in direct root handler: {e}")
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Malware Detonation Platform</title>
-            <style>
-                body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
-                h1 { color: #4a6fa5; }
-                .links { margin-top: 20px; }
-                .links a { display: inline-block; margin: 10px; padding: 8px 16px; 
-                          background-color: #4a6fa5; color: white; text-decoration: none; border-radius: 4px; }
-            </style>
-        </head>
-        <body>
-            <h1>Malware Detonation Platform</h1>
-            <p>Welcome to the Malware Detonation Platform</p>
-            <div class="links">
-                <a href="/malware">Malware Analysis</a>
-                <a href="/detonation">Detonation Service</a>
-                <a href="/viz">Visualizations</a>
-                <a href="/diagnostic">System Diagnostics</a>
-            </div>
-        </body>
-        </html>
-        """
-
 def handle_not_found(e):
     """Handle 404 errors gracefully"""
     logger.warning(f"404 error: {request.path} not found")
@@ -105,79 +72,275 @@ def handle_not_found(e):
         """, 404
 
 def ensure_index_template(app):
-    """Create a minimal index.html if it doesn't exist."""
+    """Create a minimal index.html if it doesn't exist or is too small."""
     template_dir = app.template_folder
     if not os.path.isabs(template_dir):
         template_dir = os.path.join(app.root_path, template_dir)
             
     # Ensure directory exists
+    logger.info(f"Ensuring templates exist in directory: {template_dir}")
     os.makedirs(template_dir, exist_ok=True)
     
-    # Create base.html if it doesn't exist
+    # Create base.html if it doesn't exist or is too small
     base_path = os.path.join(template_dir, 'base.html')
+    
+    # Check if base.html exists and has adequate content
+    needs_create = False
     if not os.path.exists(base_path):
-        with open(base_path, 'w') as f:
-            f.write("""<!DOCTYPE html>
+        needs_create = True
+        logger.info("base.html does not exist, will create it")
+    else:
+        # Check file size
+        try:
+            with open(base_path, 'r') as f:
+                content = f.read()
+                if len(content) < 100:  # Too small to be a proper template
+                    needs_create = True
+                    logger.warning(f"base.html exists but is too small ({len(content)} bytes), will recreate it")
+                else:
+                    logger.info(f"Successfully verified base.html is readable ({len(content)} bytes)")
+        except Exception as e:
+            needs_create = True
+            logger.error(f"Error reading base.html: {e}, will recreate it")
+    
+    if needs_create:
+        try:
+            with open(base_path, 'w') as f:
+                f.write("""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}{{ app_name }}{% endblock %}</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        h1 { color: #4a6fa5; }
-        .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin-top: 20px; }
-        a { color: #4a6fa5; text-decoration: none; }
-        a:hover { text-decoration: underline; }
-    </style>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    
+    <!-- Custom CSS -->
+    <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
     {% block head %}{% endblock %}
+    
+    <style>
+        .navbar { background-color: {{ colors.primary|default('#4a6fa5') }} !important; }
+        .btn-primary { background-color: {{ colors.primary|default('#4a6fa5') }}; border-color: {{ colors.primary|default('#4a6fa5') }}; }
+        .btn-primary:hover { background-color: {{ colors.primary|default('#4a6fa5') }}; filter: brightness(90%); }
+    </style>
 </head>
 <body>
-    <h1>{% block header %}{{ app_name }}{% endblock %}</h1>
-    {% block content %}{% endblock %}
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark">
+        <div class="container">
+            <a class="navbar-brand" href="/">{{ app_name }}</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item"><a class="nav-link" href="/">Home</a></li>
+                    {% if current_user.is_authenticated %}
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('web.dashboard') }}">Dashboard</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('malware.index') }}">Malware</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('detonation.index') }}">Detonation</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('viz.index') }}">Visualizations</a></li>
+                    {% endif %}
+                </ul>
+                <ul class="navbar-nav">
+                    {% if current_user.is_authenticated %}
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown">
+                            <i class="fas fa-user"></i> {{ current_user.username }}
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end">
+                            <li><a class="dropdown-item" href="{{ url_for('web.profile') }}">Profile</a></li>
+                            {% if current_user.role == 'admin' %}
+                            <li><a class="dropdown-item" href="{{ url_for('web.users') }}">User Management</a></li>
+                            <li><a class="dropdown-item" href="{{ url_for('web.infrastructure') }}">Infrastructure</a></li>
+                            {% endif %}
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="{{ url_for('web.logout') }}">Logout</a></li>
+                        </ul>
+                    </li>
+                    {% else %}
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('web.login') }}"><i class="fas fa-sign-in-alt"></i> Login</a></li>
+                    {% endif %}
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container mt-4">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, message in messages %}
+              <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+        
+        {% block content %}{% endblock %}
+    </div>
+
+    <!-- Footer -->
+    <footer class="mt-5 py-3 text-center text-muted">
+        <div class="container">
+            <p>&copy; {{ year|default('2025') }} {{ app_name }}</p>
+        </div>
+    </footer>
+
+    <!-- Bootstrap JS Bundle with Popper -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Custom JS -->
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% block scripts %}{% endblock %}
 </body>
 </html>""")
-        logger.info("Created base.html template")
+            logger.info("Created base.html template")
+        except Exception as e:
+            logger.error(f"Error generating base.html: {e}")
     
-    # Create index.html if it doesn't exist
+    # Create index.html if it doesn't exist or is too small
     index_path = os.path.join(template_dir, 'index.html')
+    
+    # Check if index.html exists and has adequate content
+    needs_create = False
     if not os.path.exists(index_path):
-        with open(index_path, 'w') as f:
-            f.write("""{% extends 'base.html' %}
+        needs_create = True
+        logger.info("index.html does not exist, will create it")
+    else:
+        # Check file size
+        try:
+            with open(index_path, 'r') as f:
+                content = f.read()
+                if len(content) < 100:  # Too small to be a proper template
+                    needs_create = True
+                    logger.warning(f"index.html exists but is too small ({len(content)} bytes), will recreate it")
+                else:
+                    logger.info(f"Successfully verified index.html is readable ({len(content)} bytes)")
+        except Exception as e:
+            needs_create = True
+            logger.error(f"Error reading index.html: {e}, will recreate it")
+    
+    if needs_create:
+        try:
+            with open(index_path, 'w') as f:
+                f.write("""{% extends 'base.html' %}
 
 {% block title %}{{ app_name }}{% endblock %}
 
 {% block content %}
-<div class="card">
-    <h2>Welcome to {{ app_name }}</h2>
-    <p>A secure platform for malware analysis and detonation.</p>
-    <div>
-        <a href="/malware">Malware Analysis</a> |
-        <a href="/detonation">Detonation Service</a> |
-        <a href="/viz">Visualizations</a> |
-        <a href="/diagnostic">Diagnostics</a>
+<div class="jumbotron bg-light p-5 rounded">
+    <h1 class="display-4">Welcome to {{ app_name }}</h1>
+    <p class="lead">A secure platform for malware analysis and detonation.</p>
+    <hr class="my-4">
+    <p>Use the navigation bar above to access different features of the platform.</p>
+    {% if not current_user.is_authenticated %}
+    <a class="btn btn-primary btn-lg" href="{{ url_for('web.login') }}" role="button">Login</a>
+    {% else %}
+    <a class="btn btn-primary btn-lg" href="{{ url_for('web.dashboard') }}" role="button">Go to Dashboard</a>
+    {% endif %}
+</div>
+
+<div class="row mt-5">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-virus fa-3x mb-3 text-primary"></i>
+                <h5 class="card-title">Malware Analysis</h5>
+                <p class="card-text">Upload and analyze malware samples securely.</p>
+                <a href="{{ url_for('malware.index') }}" class="btn btn-outline-primary">Analyze Malware</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-flask fa-3x mb-3 text-primary"></i>
+                <h5 class="card-title">Detonation Services</h5>
+                <p class="card-text">Detonate samples in an isolated environment.</p>
+                <a href="{{ url_for('detonation.index') }}" class="btn btn-outline-primary">Detonation Zone</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-chart-line fa-3x mb-3 text-primary"></i>
+                <h5 class="card-title">Visualizations</h5>
+                <p class="card-text">Visualize data and create reports.</p>
+                <a href="{{ url_for('viz.index') }}" class="btn btn-outline-primary">View Analytics</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-wrench fa-2x mb-3 text-primary"></i>
+                <h5 class="card-title">Diagnostics</h5>
+                <p class="card-text">Check system status and troubleshoot issues.</p>
+                <a href="{{ url_for('web.diagnostic') }}" class="btn btn-outline-primary">System Diagnostics</a>
+            </div>
+        </div>
     </div>
 </div>
 {% endblock %}""")
-        logger.info("Created index.html template")
-            
+                logger.info("Created index.html template")
+        except Exception as e:
+            logger.error(f"Error generating index.html: {e}")
+    
     # Create error.html if it doesn't exist
     error_path = os.path.join(template_dir, 'error.html')
     if not os.path.exists(error_path):
-        with open(error_path, 'w') as f:
-            f.write("""{% extends 'base.html' %}
-{% block title %}Error{% endblock %}
+        try:
+            with open(error_path, 'w') as f:
+                f.write("""{% extends 'base.html' %}
+
+{% block title %}Error {{ error_code }} - {{ app_name }}{% endblock %}
+
 {% block content %}
-<div class="card">
-    <h2>Error {{ error_code }}</h2>
-    <p>{{ error_message }}</p>
-    {% if error_details %}
-    <pre>{{ error_details }}</pre>
-    {% endif %}
-    <a href="/">Return Home</a>
+<div class="row justify-content-center mt-5">
+    <div class="col-md-8">
+        <div class="card text-center">
+            <div class="card-header bg-danger text-white">
+                <h2 class="card-title">Error {{ error_code }}</h2>
+            </div>
+            <div class="card-body">
+                <p class="display-1 text-danger"><i class="fas fa-exclamation-triangle"></i></p>
+                <h4>{{ error_message }}</h4>
+                <p class="text-muted">Please try again or contact your system administrator if the problem persists.</p>
+                
+                {% if error_details and config.get('DEBUG', False) %}
+                <div class="alert alert-secondary mt-4">
+                    <h5>Debug Details</h5>
+                    <pre class="text-start"><code>{{ error_details }}</code></pre>
+                </div>
+                {% endif %}
+                
+                <a href="/" class="btn btn-primary mt-3">Return to Home</a>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}""")
-        logger.info("Created error.html template")
+                logger.info("Created error.html template")
+        except Exception as e:
+            logger.error(f"Error generating error.html: {e}")
+    
+    # Check what templates are in the directory
+    try:
+        template_files = os.listdir(template_dir)
+        logger.info(f"Templates directory contains: {template_files}")
+    except Exception as e:
+        logger.error(f"Error listing templates directory: {e}")
 
 # Template generation utility (to be used by all modules)
 def generate_template(template_path, content, force=False):
@@ -429,8 +592,41 @@ def create_app(test_config=None):
         except Exception as e:
             logger.warning(f"Failed to fix web blueprint: {e}")
         
-        # CRITICAL: Register direct root route FIRST to ensure it exists
-        app.add_url_rule('/', 'direct_root', direct_root_handler)
+        # *** CRITICAL: REGISTER ROOT ROUTE FIRST AND DIRECTLY ON APP ***
+        @app.route('/')
+        def root():
+            """Primary root route handler."""
+            logger.info("Primary root handler called")
+            try:
+                return render_template('index.html')
+            except Exception as e:
+                logger.error(f"Error in primary root handler: {e}")
+                return f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Malware Detonation Platform</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+                        h1 {{ color: #4a6fa5; }}
+                        .links {{ margin-top: 20px; }}
+                        .links a {{ display: inline-block; margin: 0 10px; color: #4a6fa5; text-decoration: none; }}
+                        .links a:hover {{ text-decoration: underline; }}
+                    </style>
+                </head>
+                <body>
+                    <h1>Malware Detonation Platform</h1>
+                    <p>Welcome to the Malware Detonation Platform.</p>
+                    <div class="links">
+                        <a href="/malware">Malware Analysis</a>
+                        <a href="/detonation">Detonation Service</a>
+                        <a href="/viz">Visualizations</a>
+                        <a href="/diagnostic">System Diagnostics</a>
+                    </div>
+                </body>
+                </html>
+                """
+        
         logger.info("Direct root route registered as primary handler")
         
         # Register error handlers
@@ -493,7 +689,8 @@ def create_app(test_config=None):
             try:
                 from web_interface import web_bp
                 # CRITICAL: Register with empty URL prefix and ensure it takes precedence
-                app.register_blueprint(web_bp)
+                web_bp.url_prefix = None  # Explicitly set to None, not empty string
+                app.register_blueprint(web_bp, url_prefix=None)  # Use None to avoid any Flask string concatenation issues
                 logger.info("Direct web blueprint registration successful")
             except Exception as e:
                 logger.error(f"Error directly registering web blueprint: {e}")
@@ -532,7 +729,7 @@ def create_app(test_config=None):
         @app.route('/start')
         def redirect_to_root():
             logger.info("Redirecting alternate root URLs to /")
-            return redirect(url_for('direct_root'))
+            return redirect(url_for('root'))
         
         # Mark application as ready
         try:
