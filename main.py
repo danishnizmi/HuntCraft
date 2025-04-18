@@ -1,3 +1,4 @@
+# main.py - Modified with centralized utility functions
 from flask import Flask, render_template, jsonify, g, request
 import os
 import logging
@@ -5,6 +6,7 @@ import importlib
 import time
 import sys
 import traceback
+from database import close_db
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -145,6 +147,84 @@ def ensure_index_template(app):
 </div>
 {% endblock %}""")
 
+def feature_detection():
+    """Detect available features and stub implementations"""
+    features = {}
+    
+    # Check for visualization libraries
+    try:
+        import pandas
+        import numpy
+        features['pandas_numpy'] = True
+        
+        try:
+            import plotly
+            features['plotly'] = True
+        except ImportError:
+            features['plotly'] = False
+    except ImportError:
+        features['pandas_numpy'] = False
+        features['plotly'] = False
+    
+    # Check for GCP libraries
+    try:
+        import google.cloud.storage
+        import google.cloud.compute_v1
+        features['gcp'] = True
+    except ImportError:
+        features['gcp'] = False
+    
+    # Check for stub modules vs real ones
+    try:
+        import ssdeep
+        # Test if it's a stub by checking for stub_hash
+        test_hash = ssdeep.hash("test")
+        features['real_ssdeep'] = test_hash != "stub_hash"
+    except (ImportError, AttributeError):
+        features['real_ssdeep'] = False
+    
+    try:
+        import yara
+        # Try to compile a rule - stubs will fail
+        try:
+            rules = yara.compile(source="rule test { condition: true }")
+            features['real_yara'] = True
+        except:
+            features['real_yara'] = False
+    except ImportError:
+        features['real_yara'] = False
+        
+    # Check for script integration readiness
+    features['scripts_available'] = os.path.exists('scripts/reporting.py') and os.path.exists('scripts/sanitizer.py')
+    
+    return features
+
+def register_unified_health_check(app):
+    """Register a consolidated health check endpoint"""
+    @app.route('/health')
+    def health_check():
+        from database import check_database_health
+        
+        health_data = {
+            "status": "healthy",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "uptime_seconds": int(time.time() - app.config['START_TIME']),
+            "database": check_database_health(),
+            "modules": module_status,
+            "features": feature_detection()
+        }
+        
+        # Determine overall status
+        if health_data["database"]["status"] != "healthy":
+            health_data["status"] = "degraded"
+            
+        for module, status in module_status.items():
+            if not status.get("initialized", False):
+                health_data["status"] = "degraded"
+                break
+                
+        return jsonify(health_data)
+
 def create_app(test_config=None):
     """Create and configure the Flask application."""
     # Record start time for uptime tracking
@@ -188,10 +268,8 @@ def create_app(test_config=None):
     # Register direct root handler as fallback
     app.add_url_rule('/', 'direct_root', direct_root_handler)
     
-    # Add health check endpoint
-    @app.route('/health')
-    def health_check():
-        return jsonify({"status": "healthy", "source": "main_app"}), 200
+    # Register unified health check
+    register_unified_health_check(app)
     
     # Set up request tracking
     @app.before_request
@@ -248,6 +326,21 @@ def create_app(test_config=None):
     
     logger.info(f"Application startup completed in {time.time() - start_time:.2f} seconds")
     return app
+
+# Template generation utility that can be used by multiple modules
+def generate_template(template_path, content, force=False):
+    """Generate a template file if it doesn't exist"""
+    try:
+        if force or not os.path.exists(template_path):
+            os.makedirs(os.path.dirname(template_path), exist_ok=True)
+            with open(template_path, 'w') as f:
+                f.write(content)
+            logger.info(f"Generated template: {os.path.basename(template_path)}")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error generating template {template_path}: {e}")
+        return False
 
 if __name__ == "__main__":
     app = create_app()
