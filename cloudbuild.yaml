@@ -155,15 +155,15 @@ steps:
         # Wait a moment for deployment to stabilize
         sleep 10
         
-        # Get service URL
+        # Get service URL and print directly without using a variable
         echo "Retrieving service URL..."
-        SERVICE_URL=$(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null || echo "Service URL not available")
-        echo "Service URL: $SERVICE_URL"
+        echo "Service URL: $(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null || echo 'Service URL not available')"
         
-        # Simple health check attempt
-        if [ "$SERVICE_URL" != "Service URL not available" ]; then
-          echo "Checking service health..."
-          curl -s "$SERVICE_URL/health" || echo "Service not yet responding - may still be starting up"
+        # Simple health check attempt without using variables
+        echo "Checking service health..."
+        URL_OUTPUT=$(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null)
+        if [ -n "$URL_OUTPUT" ]; then
+          curl -s "$URL_OUTPUT/health" || echo "Service not yet responding - may still be starting up"
         else
           echo "Skipping health check - service URL not available"
         fi
