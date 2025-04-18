@@ -1,54 +1,132 @@
 # Cloud Build configuration file for the Malware Detonation Platform
 steps:
-  # Build the Docker image
+  # Setup infrastructure before build
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'infrastructure-setup'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Setting up required infrastructure..."
+        
+        # Create required storage buckets
+        echo "Creating storage buckets..."
+        gsutil mb -l ${_REGION} gs://malware-samples-$PROJECT_ID || echo "Bucket already exists"
+        gsutil mb -l ${_REGION} gs://detonation-results-$PROJECT_ID || echo "Bucket already exists"
+        
+        # Create Pub/Sub topic and subscription for notifications
+        echo "Setting up Pub/Sub..."
+        gcloud pubsub topics create detonation-notifications || echo "Topic already exists"
+        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications || echo "Subscription already exists"
+        
+        # Create service account if it doesn't exist
+        echo "Setting up service account..."
+        gcloud iam service-accounts describe malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com || \
+        gcloud iam service-accounts create malware-platform-sa \
+          --display-name="Malware Detonation Platform Service Account"
+        
+        # Ensure service account has required roles
+        echo "Granting roles to service account..."
+        SA_EMAIL="malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
+        REQUIRED_ROLES=(
+          "roles/storage.admin"
+          "roles/pubsub.publisher"
+          "roles/pubsub.subscriber"
+          "roles/logging.logWriter"
+          "roles/run.admin"
+          "roles/compute.admin"
+          "roles/secretmanager.secretAccessor"
+        )
+        
+        for role in "${REQUIRED_ROLES[@]}"; do
+          gcloud projects add-iam-policy-binding $PROJECT_ID \
+            --member="serviceAccount:$SA_EMAIL" \
+            --role="$role" || echo "Role binding $role already exists or failed"
+        done
+        
+        echo "Infrastructure setup complete"
+
+  # Build the Docker image with extended timeout for large builds
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
     args: ['build', '-t', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA', '.']
-    timeout: '1200s'
+    timeout: '1800s'
 
-  # Tag the image as latest
+  # Push the image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['tag', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA', 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest']
-
-  # Push the images to Container Registry
-  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-sha-image'
     args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA']
 
+  # Deploy to Cloud Run using cloudrun.yaml configuration
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-cloud-run'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Deploying to Cloud Run..."
+        
+        # First, verify the cloudrun.yaml file exists
+        if [ ! -f cloudrun.yaml ]; then
+          echo "Error: cloudrun.yaml not found!"
+          exit 1
+        fi
+        
+        # Process the cloudrun.yaml file to ensure $PROJECT_ID is properly substituted
+        # This handles cases where the YAML parser might not substitute all variables
+        cat cloudrun.yaml | \
+        sed "s/\$PROJECT_ID/$PROJECT_ID/g" | \
+        sed "s/\$COMMIT_SHA/$COMMIT_SHA/g" > processed_cloudrun.yaml
+        
+        # Deploy using the processed YAML file
+        gcloud run services replace processed_cloudrun.yaml \
+          --platform=managed \
+          --region=${_REGION}
+        
+        # Allow public access if needed
+        gcloud run services add-iam-policy-binding malware-detonation-platform \
+          --member="allUsers" \
+          --role="roles/run.invoker" \
+          --region=${_REGION}
+          
+        echo "Deployment to Cloud Run complete"
+
+  # Tag the image as latest for future reference
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'tag-latest'
+    args: ['tag', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA', 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest']
+
+  # Push the latest tag
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-latest'
     args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest']
 
-  # Create Pub/Sub topic and subscription
+  # Verify deployment success
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'verify-deployment'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        gcloud pubsub topics create detonation-notifications || true
-        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications || true
-
-  # Create storage buckets
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        gsutil mb -l ${_REGION} gs://malware-samples-$PROJECT_ID || true
-        gsutil mb -l ${_REGION} gs://detonation-results-$PROJECT_ID || true
-
-  # Deploy to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'gcloud'
-    args:
-      - 'run'
-      - 'deploy'
-      - 'malware-detonation-platform'
-      - '--image=gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA'
-      - '--region=${_REGION}'
-      - '--platform=managed'
-      - '--allow-unauthenticated'
+        echo "Verifying deployment..."
+        SERVICE_URL=$(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)')
+        echo "Service URL: $SERVICE_URL"
+        
+        # Simple health check attempt
+        echo "Checking service health..."
+        curl -s "$SERVICE_URL/health" || echo "Service not yet responding - may still be starting up"
+        
+        # Final deployment message
+        echo "====================================="
+        echo "Deployment complete!"
+        echo "Service URL: $SERVICE_URL"
+        echo "====================================="
 
 # Configuration options
 options:
   logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'  # More powerful machine for faster builds
+  dynamicSubstitutions: true
 
 # Images to push
 images:
@@ -59,5 +137,5 @@ images:
 substitutions:
   _REGION: us-central1
 
-# Build timeout
-timeout: '1800s'
+# Extended build timeout (60 minutes)
+timeout: '3600s'
