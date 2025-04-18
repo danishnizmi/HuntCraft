@@ -21,9 +21,8 @@ steps:
         
         # Create service account if it doesn't exist
         echo "Setting up service account..."
-        SA_EXISTS=$(gcloud iam service-accounts list --filter="email:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" --format="value(email)" | grep -c malware-platform-sa || echo "0")
-        
-        if [ "$SA_EXISTS" -eq "0" ]; then
+        # Check if service account exists directly in the if condition
+        if ! gcloud iam service-accounts list --filter="email:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" --format="value(email)" | grep -q malware-platform-sa; then
           echo "Creating service account malware-platform-sa..."
           gcloud iam service-accounts create malware-platform-sa \
             --display-name="Malware Detonation Platform Service Account" || echo "Failed to create service account, may already exist"
@@ -31,27 +30,57 @@ steps:
           echo "Service account malware-platform-sa already exists"
         fi
         
-        # Grant IAM roles using --condition=None flag
+        # Grant IAM roles individually with --condition=None flag
         echo "Granting roles to service account..."
         
-        # Helper function for role binding
-        grant_role() {
-          local role=$1
-          echo "Granting role $role..."
-          gcloud projects add-iam-policy-binding $PROJECT_ID \
-            --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-            --role="$role" \
-            --condition=None > /dev/null 2>&1 || echo "Role binding for $role failed or already exists"
-        }
+        # Storage Admin role
+        echo "Granting Storage Admin role..."
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/storage.admin" \
+          --condition=None > /dev/null 2>&1 || echo "Role binding for Storage Admin failed or already exists"
         
-        # Grant all required roles
-        grant_role "roles/storage.admin"
-        grant_role "roles/pubsub.publisher"
-        grant_role "roles/pubsub.subscriber"
-        grant_role "roles/logging.logWriter"
-        grant_role "roles/run.admin"
-        grant_role "roles/compute.admin"
-        grant_role "roles/secretmanager.secretAccessor"
+        # Pub/Sub Publisher role
+        echo "Granting Pub/Sub Publisher role..."
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/pubsub.publisher" \
+          --condition=None > /dev/null 2>&1 || echo "Role binding for Pub/Sub Publisher failed or already exists"
+        
+        # Pub/Sub Subscriber role
+        echo "Granting Pub/Sub Subscriber role..."
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/pubsub.subscriber" \
+          --condition=None > /dev/null 2>&1 || echo "Role binding for Pub/Sub Subscriber failed or already exists"
+        
+        # Logs Writer role
+        echo "Granting Logs Writer role..."
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/logging.logWriter" \
+          --condition=None > /dev/null 2>&1 || echo "Role binding for Logs Writer failed or already exists"
+        
+        # Cloud Run Admin role
+        echo "Granting Cloud Run Admin role..."
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/run.admin" \
+          --condition=None > /dev/null 2>&1 || echo "Role binding for Cloud Run Admin failed or already exists"
+        
+        # Compute Admin role
+        echo "Granting Compute Admin role..."
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/compute.admin" \
+          --condition=None > /dev/null 2>&1 || echo "Role binding for Compute Admin failed or already exists"
+        
+        # Secret Manager Secret Accessor role
+        echo "Granting Secret Manager Secret Accessor role..."
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/secretmanager.secretAccessor" \
+          --condition=None > /dev/null 2>&1 || echo "Role binding for Secret Manager Secret Accessor failed or already exists"
         
         echo "Infrastructure setup complete"
 
@@ -123,11 +152,15 @@ steps:
       - |
         echo "Verifying deployment..."
         
-        # Get service URL without using a variable that Cloud Build might misinterpret
+        # Wait a moment for deployment to stabilize
+        sleep 10
+        
+        # Get service URL
+        echo "Retrieving service URL..."
         SERVICE_URL=$(gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null || echo "Service URL not available")
         echo "Service URL: $SERVICE_URL"
         
-        # Simple health check attempt - avoiding variable assignment
+        # Simple health check attempt
         if [ "$SERVICE_URL" != "Service URL not available" ]; then
           echo "Checking service health..."
           curl -s "$SERVICE_URL/health" || echo "Service not yet responding - may still be starting up"
