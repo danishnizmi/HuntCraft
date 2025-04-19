@@ -8,6 +8,9 @@ import logging
 import traceback
 import hashlib
 import secrets
+import subprocess
+import time
+import threading
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 from pathlib import Path
@@ -20,10 +23,247 @@ web_bp = Blueprint('web', __name__)
 login_manager = LoginManager()
 
 class User(UserMixin):
+    """User class for Flask-Login"""
     def __init__(self, id, username, role):
         self.id = id
         self.username = username
         self.role = role
+
+class InfrastructureManager:
+    """Class for managing cloud infrastructure using Terraform."""
+    
+    def __init__(self, app=None):
+        """Initialize the infrastructure manager."""
+        self.app = app
+        self.terraform_dir = os.path.join(os.getcwd(), 'terraform')
+        self.project_id = None
+        self.region = 'us-central1'
+        self.zone = 'us-central1-a'
+        self.status = {
+            "initialized": False,
+            "last_apply": None,
+            "error": None,
+            "resources": {}
+        }
+        
+        if app:
+            self.init_app(app)
+    
+    def init_app(self, app):
+        """Configure with Flask app settings."""
+        self.app = app
+        with app.app_context():
+            self.project_id = app.config.get('GCP_PROJECT_ID')
+            self.region = app.config.get('GCP_REGION', 'us-central1')
+            self.zone = app.config.get('GCP_ZONE', 'us-central1-a')
+            
+            # Store in app context for global access
+            app.infrastructure_manager = self
+    
+    def check_terraform_installed(self):
+        """Check if Terraform is installed and available."""
+        try:
+            result = subprocess.run(['terraform', '--version'], 
+                                   capture_output=True, text=True, check=True)
+            logger.info(f"Terraform is installed: {result.stdout.splitlines()[0]}")
+            return True
+        except (subprocess.SubprocessError, FileNotFoundError):
+            logger.warning("Terraform is not installed or not in PATH")
+            return False
+    
+    def initialize(self):
+        """Initialize Terraform configuration."""
+        if not self.check_terraform_installed():
+            self.status["error"] = "Terraform not installed"
+            return False
+            
+        if not self.project_id:
+            self.status["error"] = "No GCP Project ID configured"
+            return False
+            
+        try:
+            # Run terraform init
+            result = subprocess.run(
+                ['terraform', 'init'],
+                cwd=self.terraform_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            logger.info(f"Terraform initialization successful")
+            self.status["initialized"] = True
+            self.status["error"] = None
+            return True
+        except subprocess.SubprocessError as e:
+            error_msg = f"Terraform initialization failed: {str(e)}"
+            logger.error(error_msg)
+            self.status["error"] = error_msg
+            return False
+        except Exception as e:
+            error_msg = f"Error during Terraform initialization: {str(e)}"
+            logger.error(error_msg)
+            self.status["error"] = error_msg
+            return False
+    
+    def apply(self, auto_approve=False):
+        """Apply Terraform configuration to create/update infrastructure."""
+        if not self.status["initialized"]:
+            if not self.initialize():
+                return False
+        
+        try:
+            # Build command with variables
+            cmd = ['terraform', 'apply']
+            
+            # Add auto-approve if specified
+            if auto_approve:
+                cmd.append('-auto-approve')
+                
+            # Add variables
+            cmd.extend([
+                f'-var=project_id={self.project_id}',
+                f'-var=region={self.region}',
+                f'-var=zone={self.zone}'
+            ])
+            
+            # Run terraform apply
+            logger.info(f"Running terraform apply")
+            result = subprocess.run(
+                cmd,
+                cwd=self.terraform_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            logger.info("Terraform apply successful")
+            self.status["last_apply"] = time.time()
+            self.status["error"] = None
+            
+            # Update resource information
+            self._update_resource_info()
+            
+            return True
+        except subprocess.SubprocessError as e:
+            error_msg = f"Terraform apply failed: {str(e)}"
+            logger.error(error_msg)
+            self.status["error"] = error_msg
+            return False
+        except Exception as e:
+            error_msg = f"Error during Terraform apply: {str(e)}"
+            logger.error(error_msg)
+            self.status["error"] = error_msg
+            return False
+    
+    def destroy(self, auto_approve=False):
+        """Destroy infrastructure created by Terraform."""
+        if not self.status["initialized"]:
+            if not self.initialize():
+                return False
+                
+        try:
+            # Build command
+            cmd = ['terraform', 'destroy']
+            
+            # Add auto-approve if specified
+            if auto_approve:
+                cmd.append('-auto-approve')
+                
+            # Add variables
+            cmd.extend([
+                f'-var=project_id={self.project_id}',
+                f'-var=region={self.region}',
+                f'-var=zone={self.zone}'
+            ])
+            
+            # Run terraform destroy
+            logger.info(f"Running terraform destroy")
+            result = subprocess.run(
+                cmd,
+                cwd=self.terraform_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            logger.info("Terraform destroy successful")
+            self.status["resources"] = {}
+            return True
+        except subprocess.SubprocessError as e:
+            error_msg = f"Terraform destroy failed: {str(e)}"
+            logger.error(error_msg)
+            self.status["error"] = error_msg
+            return False
+        except Exception as e:
+            error_msg = f"Error during Terraform destroy: {str(e)}"
+            logger.error(error_msg)
+            self.status["error"] = error_msg
+            return False
+    
+    def get_outputs(self):
+        """Get Terraform outputs."""
+        if not self.status["initialized"]:
+            if not self.initialize():
+                return {}
+                
+        try:
+            # Run terraform output
+            result = subprocess.run(
+                ['terraform', 'output', '-json'],
+                cwd=self.terraform_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            # Parse JSON output
+            outputs = json.loads(result.stdout)
+            
+            # Extract values from the output structure
+            return {k: v.get('value') for k, v in outputs.items()}
+        except Exception as e:
+            logger.error(f"Error getting Terraform outputs: {str(e)}")
+            return {}
+    
+    def _update_resource_info(self):
+        """Update information about deployed resources."""
+        try:
+            # Get outputs which include resource information
+            outputs = self.get_outputs()
+            
+            # Extract resource information
+            self.status["resources"] = {
+                "storage": {
+                    "malware_samples_bucket": outputs.get("malware_samples_bucket"),
+                    "detonation_results_bucket": outputs.get("detonation_results_bucket")
+                },
+                "pubsub": {
+                    "topic": outputs.get("pubsub_topic")
+                },
+                "vm_templates": {
+                    "windows": outputs.get("windows_template"),
+                    "linux": outputs.get("linux_template")
+                },
+                "service": {
+                    "url": outputs.get("service_url")
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error updating resource information: {str(e)}")
+            self.status["resources"] = {}
+    
+    def apply_async(self, auto_approve=True, callback=None):
+        """Apply Terraform configuration asynchronously."""
+        def _async_apply():
+            success = self.apply(auto_approve)
+            if callback:
+                callback(success)
+        
+        thread = threading.Thread(target=_async_apply)
+        thread.daemon = True
+        thread.start()
+        return thread
 
 def generate_admin_password(app):
     """Generate a deterministic admin password based on app configuration."""
@@ -64,6 +304,19 @@ def init_app(app):
             ensure_db_tables(app)
             generate_base_templates(app)
             generate_static_files(app)
+        
+        # Initialize infrastructure manager
+        try:
+            if app.config.get('INITIALIZE_GCP', False):
+                infra_manager = InfrastructureManager()
+                infra_manager.init_app(app)
+                # Optionally initialize Terraform, but don't apply
+                if infra_manager.initialize():
+                    logger.info("Infrastructure manager initialized successfully")
+                else:
+                    logger.warning("Infrastructure initialization failed, but continuing")
+        except Exception as e:
+            logger.error(f"Error initializing infrastructure manager: {e}")
             
         logger.info("Web interface module initialized successfully")
     except Exception as e:
@@ -228,6 +481,16 @@ def create_database_schema(cursor):
                 ("admin", generate_password_hash(admin_password), "admin")
             )
             logger.info(f"Created admin user with password: {admin_password}")
+        
+        # Create infrastructure status table for tracking
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS infrastructure_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            component TEXT NOT NULL,
+            status TEXT NOT NULL,
+            details TEXT,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
         
         logger.info("Web interface database schema created successfully")
     except Exception as e:
@@ -473,7 +736,15 @@ def diagnostic():
         from main import module_status
         diagnostics['module_status'] = module_status
     except ImportError:
-        diagnostics['module_status'] = {'error': 'Could not import module_status from main'}
+        # Try using MODULES directly from main
+        try:
+            from main import MODULES
+            diagnostics['module_status'] = {name: {
+                "initialized": info.get("initialized", False),
+                "error": info.get("error", None)
+            } for name, info in MODULES.items()}
+        except ImportError:
+            diagnostics['module_status'] = {'error': 'Could not import module status from main'}
     
     # Check template files
     try:
@@ -580,16 +851,165 @@ def initialize_database():
 @login_required
 @admin_required
 def infrastructure():
-    """Infrastructure management placeholder"""
-    return redirect(url_for('web.diagnostic'))
+    """Infrastructure management page"""
+    try:
+        # Get infrastructure manager
+        infra_manager = current_app.infrastructure_manager if hasattr(current_app, 'infrastructure_manager') else None
+        
+        # Get infrastructure status
+        if infra_manager:
+            tf_installed = infra_manager.check_terraform_installed()
+            outputs = infra_manager.get_outputs() if infra_manager.status["initialized"] else {}
+            status = infra_manager.status
+        else:
+            tf_installed = False
+            outputs = {}
+            status = {"initialized": False, "error": "Infrastructure manager not initialized"}
+            
+        return render_template('infrastructure.html', 
+                              tf_installed=tf_installed,
+                              status=status,
+                              outputs=outputs)
+    except Exception as e:
+        logger.error(f"Error in infrastructure page: {e}")
+        flash(f"Error loading infrastructure management: {str(e)}", "error")
+        return redirect(url_for('web.dashboard'))
 
-@web_bp.route('/add_user')
+@web_bp.route('/infrastructure/apply', methods=['POST'])
+@login_required
+@admin_required
+def infrastructure_apply():
+    """Apply Terraform configuration"""
+    try:
+        # Get infrastructure manager
+        infra_manager = current_app.infrastructure_manager if hasattr(current_app, 'infrastructure_manager') else None
+        
+        if not infra_manager:
+            flash("Infrastructure manager not initialized", "error")
+            return redirect(url_for('web.infrastructure'))
+        
+        # Apply asynchronously to avoid blocking the request
+        def apply_callback(success):
+            if success:
+                # Can't use flash here as we're in a background thread
+                logger.info("Terraform apply completed successfully")
+            else:
+                logger.error(f"Terraform apply failed: {infra_manager.status['error']}")
+        
+        infra_manager.apply_async(auto_approve=True, callback=apply_callback)
+        
+        flash("Infrastructure deployment started. This may take several minutes.", "info")
+        return redirect(url_for('web.infrastructure'))
+    except Exception as e:
+        logger.error(f"Error applying infrastructure: {e}")
+        flash(f"Error: {str(e)}", "error")
+        return redirect(url_for('web.infrastructure'))
+
+@web_bp.route('/infrastructure/destroy', methods=['POST'])
+@login_required
+@admin_required
+def infrastructure_destroy():
+    """Destroy infrastructure"""
+    try:
+        # Get infrastructure manager
+        infra_manager = current_app.infrastructure_manager if hasattr(current_app, 'infrastructure_manager') else None
+        
+        if not infra_manager:
+            flash("Infrastructure manager not initialized", "error")
+            return redirect(url_for('web.infrastructure'))
+        
+        # Get confirmation from form
+        confirm = request.form.get('confirm', '').lower() == 'destroy'
+        
+        if not confirm:
+            flash("You must type 'destroy' to confirm infrastructure destruction", "warning")
+            return redirect(url_for('web.infrastructure'))
+        
+        # Apply asynchronously to avoid blocking the request
+        def destroy_callback(success):
+            if success:
+                logger.info("Terraform destroy completed successfully")
+            else:
+                logger.error(f"Terraform destroy failed: {infra_manager.status['error']}")
+        
+        infra_manager.apply_async(auto_approve=True, callback=destroy_callback)
+        
+        flash("Infrastructure destruction started. This may take several minutes.", "info")
+        return redirect(url_for('web.infrastructure'))
+    except Exception as e:
+        logger.error(f"Error destroying infrastructure: {e}")
+        flash(f"Error: {str(e)}", "error")
+        return redirect(url_for('web.infrastructure'))
+
+@web_bp.route('/infrastructure/status')
+@login_required
+@admin_required
+def infrastructure_status():
+    """Get infrastructure status as JSON for AJAX requests"""
+    try:
+        # Get infrastructure manager
+        infra_manager = current_app.infrastructure_manager if hasattr(current_app, 'infrastructure_manager') else None
+        
+        if not infra_manager:
+            return jsonify({
+                "initialized": False,
+                "error": "Infrastructure manager not initialized"
+            })
+        
+        # Get latest outputs
+        outputs = infra_manager.get_outputs() if infra_manager.status["initialized"] else {}
+        
+        # Combine status and outputs
+        status_data = {
+            "initialized": infra_manager.status["initialized"],
+            "last_apply": infra_manager.status["last_apply"],
+            "error": infra_manager.status["error"],
+            "resources": infra_manager.status["resources"],
+            "outputs": outputs
+        }
+        
+        return jsonify(status_data)
+    except Exception as e:
+        logger.error(f"Error getting infrastructure status: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@web_bp.route('/add_user', methods=['GET', 'POST'])
 @login_required
 @admin_required
 def add_user():
-    """User management placeholder"""
-    flash("User management functionality is not fully implemented yet.", "info")
-    return redirect(url_for('web.users'))
+    """Add new user page and handler"""
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        role = request.form.get('role', 'user')
+        
+        try:
+            # Check if username already exists
+            conn = _db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM users WHERE username = ?", (username,))
+            if cursor.fetchone()[0] > 0:
+                flash(f"User '{username}' already exists", "danger")
+                return redirect(url_for('web.add_user'))
+                
+            # Create new user
+            cursor.execute(
+                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                (username, generate_password_hash(password), role)
+            )
+            conn.commit()
+            conn.close()
+            
+            flash(f"User '{username}' created successfully", "success")
+            return redirect(url_for('web.users'))
+        except Exception as e:
+            logger.error(f"Error creating user: {e}")
+            flash(f"Error creating user: {str(e)}", "danger")
+            return redirect(url_for('web.add_user'))
+    
+    # GET request - show form
+    roles = ['user', 'admin', 'analyst']
+    return render_template('add_user.html', roles=roles)
 
 def generate_static_files(app):
     """Generate CSS and JS files if they don't exist"""
@@ -649,9 +1069,13 @@ document.addEventListener('DOMContentLoaded', function() {
     except Exception as e:
         logger.error(f"Error generating static files: {e}")
 
-def generate_base_templates(app):
+def generate_base_templates(app=None):
     """Generate essential HTML templates for the application"""
     try:
+        # Use current_app if app is not provided
+        if app is None:
+            app = current_app
+            
         # Create templates directory
         template_dir = app.template_folder
         if not os.path.isabs(template_dir):
@@ -659,7 +1083,7 @@ def generate_base_templates(app):
             
         os.makedirs(template_dir, exist_ok=True)
         
-        # Define templates
+        # Define templates with infrastructure template included
         templates = {
             'base.html': """<!DOCTYPE html>
 <html lang="en">
@@ -1119,6 +1543,50 @@ def generate_base_templates(app):
 {% endif %}
 {% endblock %}""",
 
+            'add_user.html': """{% extends 'base.html' %}
+{% block title %}Add User - {{ app_name }}{% endblock %}
+{% block content %}
+<div class="row">
+    <div class="col-md-6 mx-auto">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h2 class="card-title">Add New User</h2>
+            </div>
+            <div class="card-body">
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="username" class="form-label">Username</label>
+                        <input type="text" class="form-control" id="username" name="username" required>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="password" class="form-label">Password</label>
+                        <input type="password" class="form-control" id="password" name="password" required>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="role" class="form-label">Role</label>
+                        <select class="form-control" id="role" name="role">
+                            {% for role in roles %}
+                            <option value="{{ role }}">{{ role|title }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">Create User</button>
+                    </div>
+                </form>
+                
+                <div class="mt-3 text-center">
+                    <a href="{{ url_for('web.users') }}" class="btn btn-outline-secondary">Cancel</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}""",
+
             'diagnostic.html': """{% extends 'base.html' %}
 {% block title %}System Diagnostics - {{ app_name }}{% endblock %}
 {% block content %}
@@ -1344,6 +1812,279 @@ def generate_base_templates(app):
                 }
             });
         }
+    });
+</script>
+{% endblock %}""",
+
+            'infrastructure.html': """{% extends 'base.html' %}
+
+{% block title %}Infrastructure Management - {{ app_name }}{% endblock %}
+
+{% block head %}
+{{ super() }}
+<style>
+    .resource-card {
+        margin-bottom: 20px;
+    }
+    .status-badge {
+        font-size: 90%;
+    }
+    .terraform-output {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 5px;
+        font-family: monospace;
+        margin: 15px 0;
+        max-height: 300px;
+        overflow-y: auto;
+    }
+    .refresh-btn {
+        margin-left: 10px;
+    }
+    .destroy-confirmation {
+        display: none;
+        margin-top: 15px;
+        padding: 15px;
+        border: 1px solid #dc3545;
+        border-radius: 5px;
+        background-color: #f8d7da;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>Infrastructure Management</h1>
+    <div>
+        <button id="refresh-status" class="btn btn-outline-secondary">
+            <i class="fas fa-sync"></i> Refresh Status
+        </button>
+        <a href="{{ url_for('web.dashboard') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left"></i> Back to Dashboard
+        </a>
+    </div>
+</div>
+
+{% if not tf_installed %}
+<div class="alert alert-warning">
+    <i class="fas fa-exclamation-triangle"></i>
+    <strong>Terraform Not Installed</strong>
+    <p>Terraform is required for infrastructure management but is not installed on this server. Infrastructure operations will not be available.</p>
+</div>
+{% endif %}
+
+<div class="row">
+    <!-- Status and Controls -->
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Infrastructure Status</h5>
+            </div>
+            <div class="card-body">
+                <p>
+                    <strong>Terraform Initialized:</strong>
+                    {% if status.initialized %}
+                    <span class="badge bg-success">Yes</span>
+                    {% else %}
+                    <span class="badge bg-danger">No</span>
+                    {% endif %}
+                </p>
+                
+                {% if status.last_apply %}
+                <p>
+                    <strong>Last Applied:</strong>
+                    <span id="last-apply-time">{{ status.last_apply|default('Never', true) }}</span>
+                </p>
+                {% endif %}
+                
+                {% if status.error %}
+                <div class="alert alert-danger">
+                    <strong>Error:</strong> {{ status.error }}
+                </div>
+                {% endif %}
+                
+                <div class="d-grid gap-2 mt-3">
+                    <form method="POST" action="{{ url_for('web.infrastructure_apply') }}">
+                        <button type="submit" class="btn btn-primary w-100" {% if not tf_installed %}disabled{% endif %}>
+                            <i class="fas fa-play"></i> Apply Infrastructure
+                        </button>
+                    </form>
+                    
+                    <button id="destroy-btn" class="btn btn-danger w-100" {% if not tf_installed %}disabled{% endif %}>
+                        <i class="fas fa-trash"></i> Destroy Infrastructure
+                    </button>
+                    
+                    <div id="destroy-confirmation" class="destroy-confirmation">
+                        <p class="fw-bold text-danger">Warning: This will destroy all infrastructure resources!</p>
+                        <p>This action cannot be undone. Type "destroy" to confirm:</p>
+                        <form method="POST" action="{{ url_for('web.infrastructure_destroy') }}" class="d-flex">
+                            <input type="text" name="confirm" class="form-control me-2" placeholder="Type 'destroy'">
+                            <button type="submit" class="btn btn-danger">Confirm</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Resources -->
+    <div class="col-md-8">
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Infrastructure Resources</h5>
+            </div>
+            <div class="card-body">
+                {% if status.resources %}
+                
+                <!-- Storage Resources -->
+                <div class="resource-card">
+                    <h5><i class="fas fa-database"></i> Storage Buckets</h5>
+                    <table class="table table-sm">
+                        <tr>
+                            <th>Malware Samples Bucket:</th>
+                            <td id="malware-bucket">{{ status.resources.storage.malware_samples_bucket|default('Not created', true) }}</td>
+                        </tr>
+                        <tr>
+                            <th>Detonation Results Bucket:</th>
+                            <td id="results-bucket">{{ status.resources.storage.detonation_results_bucket|default('Not created', true) }}</td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <!-- PubSub Resources -->
+                <div class="resource-card">
+                    <h5><i class="fas fa-comments"></i> PubSub Resources</h5>
+                    <table class="table table-sm">
+                        <tr>
+                            <th>Detonation Topic:</th>
+                            <td id="pubsub-topic">{{ status.resources.pubsub.topic|default('Not created', true) }}</td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <!-- VM Templates -->
+                <div class="resource-card">
+                    <h5><i class="fas fa-server"></i> VM Templates</h5>
+                    <table class="table table-sm">
+                        <tr>
+                            <th>Windows Template:</th>
+                            <td id="windows-template">{{ status.resources.vm_templates.windows|default('Not created', true) }}</td>
+                        </tr>
+                        <tr>
+                            <th>Linux Template:</th>
+                            <td id="linux-template">{{ status.resources.vm_templates.linux|default('Not created', true) }}</td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <!-- Service URL -->
+                {% if status.resources.service and status.resources.service.url %}
+                <div class="resource-card">
+                    <h5><i class="fas fa-globe"></i> Service URL</h5>
+                    <a href="{{ status.resources.service.url }}" target="_blank">{{ status.resources.service.url }}</a>
+                </div>
+                {% endif %}
+                
+                {% else %}
+                <p class="text-muted">No infrastructure resources found. Use the "Apply Infrastructure" button to create resources.</p>
+                {% endif %}
+            </div>
+        </div>
+        
+        <!-- Terraform Outputs -->
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Terraform Outputs</h5>
+            </div>
+            <div class="card-body">
+                {% if outputs %}
+                <pre class="terraform-output">{{ outputs|pprint }}</pre>
+                {% else %}
+                <p class="text-muted">No Terraform outputs available.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Handle destroy button
+        const destroyBtn = document.getElementById('destroy-btn');
+        const destroyConfirmation = document.getElementById('destroy-confirmation');
+        
+        if (destroyBtn) {
+            destroyBtn.addEventListener('click', function() {
+                destroyConfirmation.style.display = destroyConfirmation.style.display === 'none' ? 'block' : 'none';
+            });
+        }
+        
+        // Handle refresh button
+        const refreshBtn = document.getElementById('refresh-status');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', function() {
+                refreshInfrastructureStatus();
+            });
+        }
+        
+        // Format timestamps
+        function formatTimestamp(timestamp) {
+            if (!timestamp) return 'Never';
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleString();
+        }
+        
+        // Update last apply time
+        const lastApplyTime = document.getElementById('last-apply-time');
+        if (lastApplyTime && lastApplyTime.innerText !== 'Never') {
+            lastApplyTime.innerText = formatTimestamp(parseFloat(lastApplyTime.innerText));
+        }
+        
+        // Function to refresh infrastructure status
+        function refreshInfrastructureStatus() {
+            fetch('/infrastructure/status')
+                .then(response => response.json())
+                .then(data => {
+                    // Update status fields
+                    if (data.last_apply) {
+                        document.getElementById('last-apply-time').innerText = formatTimestamp(data.last_apply);
+                    }
+                    
+                    // Update resource fields if available
+                    if (data.resources && data.resources.storage) {
+                        document.getElementById('malware-bucket').innerText = 
+                            data.resources.storage.malware_samples_bucket || 'Not created';
+                        document.getElementById('results-bucket').innerText = 
+                            data.resources.storage.detonation_results_bucket || 'Not created';
+                    }
+                    
+                    if (data.resources && data.resources.pubsub) {
+                        document.getElementById('pubsub-topic').innerText = 
+                            data.resources.pubsub.topic || 'Not created';
+                    }
+                    
+                    if (data.resources && data.resources.vm_templates) {
+                        document.getElementById('windows-template').innerText = 
+                            data.resources.vm_templates.windows || 'Not created';
+                        document.getElementById('linux-template').innerText = 
+                            data.resources.vm_templates.linux || 'Not created';
+                    }
+                    
+                    // If there's a terraform output element, update it
+                    const outputElement = document.querySelector('.terraform-output');
+                    if (outputElement && data.outputs) {
+                        outputElement.innerText = JSON.stringify(data.outputs, null, 2);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error refreshing infrastructure status:', error);
+                });
+        }
+        
+        // Auto-refresh every 30 seconds if infrastructure changes are in progress
+        const autoRefresh = setInterval(refreshInfrastructureStatus, 30000);
     });
 </script>
 {% endblock %}"""
