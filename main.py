@@ -6,6 +6,7 @@ import time
 import sys
 import traceback
 from pathlib import Path
+from flask_login import LoginManager, current_user, login_required
 
 # Configure logging with more detailed format
 logging.basicConfig(level=logging.INFO, 
@@ -241,6 +242,36 @@ def create_app(test_config=None):
         # Register error handlers
         app.register_error_handler(404, handle_not_found)
         logger.info("Registered 404 error handler")
+        
+        # Initialize LoginManager (CRITICAL FIX)
+        login_manager = LoginManager()
+        login_manager.init_app(app)
+        login_manager.login_view = 'web.login'
+        login_manager.login_message = "Please log in to access this page."
+        logger.info("Login manager initialized")
+        
+        # User loader function for Flask-Login
+        @login_manager.user_loader
+        def load_user(user_id):
+            """Load user by ID for Flask-Login"""
+            try:
+                # Import from web_interface for consistency
+                web_module = get_module('web')
+                if web_module and hasattr(web_module, 'load_user'):
+                    return web_module.load_user(user_id)
+                    
+                # Fallback if the function isn't available in web_interface
+                from database import get_db_connection
+                with get_db_connection(row_factory=lambda cursor, row: dict(row)) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, username, role FROM users WHERE id = ?", (user_id,))
+                    user_data = cursor.fetchone()
+                    if user_data:
+                        from web_interface import User
+                        return User(user_data['id'], user_data['username'], user_data['role'])
+            except Exception as e:
+                logger.error(f"Error loading user: {e}")
+            return None
         
         # Ensure basic templates exist before anything else
         ensure_base_templates()
