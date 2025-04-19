@@ -14,29 +14,50 @@ active_jobs = {}
 
 def init_app(app):
     """Initialize module with Flask app"""
-    try:
-        # Register blueprint
-        app.register_blueprint(detonation_bp)
-        logger.info("Detonation blueprint registered successfully")
+    # Register blueprint
+    app.register_blueprint(detonation_bp)
+    logger.info("Detonation blueprint registered successfully")
+    
+    with app.app_context():
+        # Create directories
+        os.makedirs('static/css', exist_ok=True)
+        os.makedirs('static/js', exist_ok=True)
+        os.makedirs('templates', exist_ok=True)
         
-        with app.app_context():
-            # Create directories
-            os.makedirs('static/css', exist_ok=True)
-            os.makedirs('static/js', exist_ok=True)
-            os.makedirs('templates', exist_ok=True)
-            
-            # Generate templates
-            generate_templates()
-            
-            # Set up Pub/Sub if running in production
-            if app.config.get('ON_CLOUD_RUN', False):
+        # Generate templates
+        generate_templates()
+        
+        # Initialize GCP environment variables if not set
+        # This is the key fix - we're setting GCP_PROJECT_ID if not present
+        if 'GCP_PROJECT_ID' not in app.config or not app.config['GCP_PROJECT_ID']:
+            # Try to get from environment variable
+            project_id = os.environ.get('GCP_PROJECT_ID') or os.environ.get('GOOGLE_CLOUD_PROJECT')
+            if project_id:
+                app.config['GCP_PROJECT_ID'] = project_id
+                logger.info(f"Set GCP_PROJECT_ID from environment: {project_id}")
+            else:
+                # In development, we can try to get from gcloud CLI
+                try:
+                    import subprocess
+                    project_id = subprocess.check_output(
+                        ["gcloud", "config", "get-value", "project"], 
+                        universal_newlines=True
+                    ).strip()
+                    if project_id:
+                        app.config['GCP_PROJECT_ID'] = project_id
+                        logger.info(f"Set GCP_PROJECT_ID from gcloud CLI: {project_id}")
+                except:
+                    logger.warning("Could not determine GCP_PROJECT_ID, detonation will be limited")
+        
+        # Set up Pub/Sub if running in production
+        if app.config.get('GCP_PROJECT_ID'):
+            try:
                 ensure_pubsub_topic()
                 setup_pubsub_subscription()
-            
-        logger.info("Detonation module initialized successfully")
-    except Exception as e:
-        logger.error(f"Error in detonation module initialization: {e}")
-        raise
+            except Exception as e:
+                logger.error(f"Error setting up Pub/Sub: {e}")
+    
+    logger.info("Detonation module initialized successfully")
 
 def create_database_schema(cursor):
     """Create database tables"""
@@ -70,63 +91,76 @@ def _db_connection(row_factory=None):
 
 def ensure_pubsub_topic():
     """Ensure the Pub/Sub topic for detonation notifications exists"""
-    try:
-        project_id = current_app.config['GCP_PROJECT_ID']
-        publisher = pubsub_v1.PublisherClient()
-        topic_path = publisher.topic_path(project_id, 'detonation-notifications')
+    project_id = get_gcp_project_id()
+    if not project_id:
+        logger.warning("Cannot set up Pub/Sub: No project ID configured")
+        return
         
-        try:
-            publisher.get_topic(request={"topic": topic_path})
-            logger.info("Detonation PubSub topic already exists")
-        except Exception:
-            publisher.create_topic(request={"name": topic_path})
-            logger.info("Created detonation PubSub topic")
-    except Exception as e:
-        logger.error(f"Error setting up PubSub topic: {e}")
-        raise
+    publisher = pubsub_v1.PublisherClient()
+    topic_path = publisher.topic_path(project_id, 'detonation-notifications')
+    
+    try:
+        publisher.get_topic(request={"topic": topic_path})
+        logger.info("Detonation PubSub topic already exists")
+    except Exception:
+        publisher.create_topic(request={"name": topic_path})
+        logger.info("Created detonation PubSub topic")
 
 def setup_pubsub_subscription():
     """Set up Pub/Sub subscription for job updates"""
+    project_id = get_gcp_project_id()
+    if not project_id:
+        logger.warning("Cannot set up Pub/Sub: No project ID configured")
+        return
+        
+    # Create subscriber client
+    subscriber = pubsub_v1.SubscriberClient()
+    subscription_path = subscriber.subscription_path(project_id, 'detonation-app-sub')
+    
     try:
-        project_id = current_app.config['GCP_PROJECT_ID']
-        
-        # Create subscriber client
-        subscriber = pubsub_v1.SubscriberClient()
-        subscription_path = subscriber.subscription_path(project_id, 'detonation-app-sub')
-        
+        # Check if subscription exists
+        subscriber.get_subscription(request={"subscription": subscription_path})
+        logger.info(f"Pub/Sub subscription already exists: {subscription_path}")
+    except Exception:
+        # Create subscription if it doesn't exist
+        topic_path = f"projects/{project_id}/topics/detonation-notifications"
+        subscriber.create_subscription(
+            request={"name": subscription_path, "topic": topic_path}
+        )
+        logger.info(f"Created new Pub/Sub subscription: {subscription_path}")
+    
+    # Start subscriber in a separate thread
+    def callback(message):
         try:
-            # Check if subscription exists
-            subscriber.get_subscription(request={"subscription": subscription_path})
-            logger.info(f"Pub/Sub subscription already exists: {subscription_path}")
-        except Exception:
-            # Create subscription if it doesn't exist
-            topic_path = f"projects/{project_id}/topics/detonation-notifications"
-            subscriber.create_subscription(
-                request={"name": subscription_path, "topic": topic_path}
-            )
-            logger.info(f"Created new Pub/Sub subscription: {subscription_path}")
-        
-        # Start subscriber in a separate thread
-        def callback(message):
-            try:
-                data = json.loads(message.data.decode('utf-8'))
-                logger.info(f"Received Pub/Sub message: {data}")
-                
-                if data.get('action') == 'job_update':
-                    handle_job_update(message)
-                message.ack()
-            except Exception as e:
-                logger.error(f"Error handling Pub/Sub message: {e}")
-                message.nack()
-        
-        threading.Thread(
-            target=lambda: subscriber.subscribe(subscription_path, callback).result(),
-            daemon=True
-        ).start()
-        
-    except Exception as e:
-        logger.error(f"Error setting up Pub/Sub subscription: {e}")
-        raise
+            data = json.loads(message.data.decode('utf-8'))
+            logger.info(f"Received Pub/Sub message: {data}")
+            
+            if data.get('action') == 'job_update':
+                handle_job_update(message)
+            message.ack()
+        except Exception as e:
+            logger.error(f"Error handling Pub/Sub message: {e}")
+            message.nack()
+    
+    threading.Thread(
+        target=lambda: subscriber.subscribe(subscription_path, callback).result(),
+        daemon=True
+    ).start()
+
+# Helper function to get GCP Project ID consistently
+def get_gcp_project_id():
+    """Get GCP project ID from config or environment"""
+    # Try from app config first
+    project_id = current_app.config.get('GCP_PROJECT_ID')
+    
+    # If not in config, try from environment
+    if not project_id:
+        project_id = os.environ.get('GCP_PROJECT_ID') or os.environ.get('GOOGLE_CLOUD_PROJECT')
+        if project_id:
+            # Cache in app config for future use
+            current_app.config['GCP_PROJECT_ID'] = project_id
+    
+    return project_id
 
 # Routes
 @detonation_bp.route('/')
@@ -167,6 +201,15 @@ def create():
     
     if request.method == 'POST':
         try:
+            # Verify GCP Project ID exists before proceeding
+            if not get_gcp_project_id():
+                # Set default project ID for local development if needed
+                if current_app.config.get('DEBUG', False):
+                    logger.warning("Setting demo project ID for local development")
+                    current_app.config['GCP_PROJECT_ID'] = "demo-project-id"
+                else:
+                    raise ValueError("GCP_PROJECT_ID is not configured. Cannot create detonation job.")
+            
             vm_type = request.form.get('vm_type', 'windows-10-x64')
             job_id = create_detonation_job(sample_id, vm_type)
             flash('Detonation job created successfully. VM deployment in progress...', 'success')
@@ -262,8 +305,9 @@ def create_detonation_job(sample_id, vm_type):
     if len(active_jobs) >= max_concurrent:
         raise ValueError(f"Maximum concurrent detonations ({max_concurrent}) reached")
     
-    # Verify GCP_PROJECT_ID is set
-    if not current_app.config.get('GCP_PROJECT_ID'):
+    # Make sure project ID is available
+    project_id = get_gcp_project_id()
+    if not project_id:
         raise ValueError("GCP_PROJECT_ID is not configured. Cannot create detonation job.")
     
     # Generate job UUID and create database record
@@ -307,8 +351,11 @@ def create_detonation_job(sample_id, vm_type):
 
 def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
     """Deploy a GCP VM for malware detonation"""
-    project_id = current_app.config['GCP_PROJECT_ID']
-    zone = current_app.config['GCP_ZONE']
+    project_id = get_gcp_project_id()
+    if not project_id:
+        raise ValueError("GCP_PROJECT_ID is not configured. Cannot deploy VM.")
+        
+    zone = current_app.config.get('GCP_ZONE', 'us-central1-a')
     
     # Generate VM name
     vm_name = f"detonation-{job_uuid[:8]}"
@@ -352,6 +399,7 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
             "purpose": "malware-detonation",
             "job-id": str(job_id),
             "vm-type": vm_type.replace('-', '_'),
+            "created-by": "huntcraft",
             "auto-delete": "true"
         },
         "scheduling": {
@@ -423,8 +471,11 @@ echo "Shutdown cleanup complete at $(date)"
 
 def setup_job_monitoring(job_id, vm_name):
     """Configure monitoring for the detonation job using Pub/Sub"""
-    project_id = current_app.config['GCP_PROJECT_ID']
-    
+    project_id = get_gcp_project_id()
+    if not project_id:
+        logger.warning(f"GCP_PROJECT_ID not configured. Skipping job monitoring setup for job {job_id}.")
+        return
+        
     # Create a Pub/Sub publisher
     publisher = pubsub_v1.PublisherClient()
     topic_path = publisher.topic_path(project_id, 'detonation-notifications')
@@ -455,15 +506,16 @@ def schedule_cleanup(job_id, vm_name, timeout_minutes=60):
             
             try:
                 # Force VM deletion
-                project_id = current_app.config['GCP_PROJECT_ID']
-                zone = current_app.config['GCP_ZONE']
-                
-                instance_client = compute_v1.InstancesClient()
-                instance_client.delete(
-                    project=project_id,
-                    zone=zone,
-                    instance=vm_name
-                )
+                project_id = get_gcp_project_id()
+                if project_id:
+                    zone = current_app.config.get('GCP_ZONE', 'us-central1-a')
+                    
+                    instance_client = compute_v1.InstancesClient()
+                    instance_client.delete(
+                        project=project_id,
+                        zone=zone,
+                        instance=vm_name
+                    )
                 
                 # Update job status to timed out
                 update_job_status(job_id, 'failed', 
@@ -528,8 +580,12 @@ def update_job_status(job_id, status, started_at=None, completed_at=None, error_
 
 def notify_job_completed(job_id, status):
     """Notify job completion via Pub/Sub"""
+    project_id = get_gcp_project_id()
+    if not project_id:
+        logger.warning(f"GCP_PROJECT_ID not configured. Skipping completion notification for job {job_id}.")
+        return
+        
     try:
-        project_id = current_app.config['GCP_PROJECT_ID']
         publisher = pubsub_v1.PublisherClient()
         topic_path = publisher.topic_path(project_id, 'detonation-notifications')
         
@@ -697,18 +753,19 @@ def cancel_detonation_job(job_id):
     # Delete VM if it exists
     if job['vm_name']:
         try:
-            project_id = current_app.config['GCP_PROJECT_ID']
-            zone = current_app.config['GCP_ZONE']
-            
-            # Create Compute Engine client
-            instance_client = compute_v1.InstancesClient()
-            
-            # Delete the VM
-            instance_client.delete(
-                project=project_id,
-                zone=zone,
-                instance=job['vm_name']
-            )
+            project_id = get_gcp_project_id()
+            if project_id:
+                zone = current_app.config.get('GCP_ZONE', 'us-central1-a')
+                
+                # Create Compute Engine client
+                instance_client = compute_v1.InstancesClient()
+                
+                # Delete the VM
+                instance_client.delete(
+                    project=project_id,
+                    zone=zone,
+                    instance=job['vm_name']
+                )
             
         except Exception as e:
             logger.error(f"Error deleting VM for job {job_id}: {e}")
