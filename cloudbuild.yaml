@@ -1,156 +1,6 @@
 # Cloud Build configuration file for the Malware Detonation Platform
 steps:
-  # Set up permissions for Cloud Build service account with fixed PROJECT_ID reference
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'setup-build-permissions'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        echo "Setting up Cloud Build permissions..."
-        
-        # Use PROJECT_ID directly from environment
-        echo "Using project: $PROJECT_ID"
-        PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
-        
-        # Grant Artifact Registry permissions
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$PROJECT_NUMBER@cloudbuild.gserviceaccount.com" \
-          --role="roles/artifactregistry.writer" > /dev/null 2>&1 || echo "Failed to grant Artifact Registry permissions"
-        
-        # Grant Storage Admin permissions (for Container Registry)
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$PROJECT_NUMBER@cloudbuild.gserviceaccount.com" \
-          --role="roles/storage.admin" > /dev/null 2>&1 || echo "Failed to grant Storage permissions"
-        
-        echo "Cloud Build permissions setup complete"
-
-  # Setup infrastructure before build - FIXED for storage bucket issues
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'infrastructure-setup'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        echo "Setting up required infrastructure..."
-        
-        # Create required storage buckets with improved error handling and validation
-        echo "Creating storage buckets..."
-        
-        # Define fully local bash variables - not referenced as Cloud Build substitutions
-        SAMPLES_BUCKET="malware-samples-$PROJECT_ID"
-        RESULTS_BUCKET="detonation-results-$PROJECT_ID"
-        
-        # Create malware samples bucket with full error logging
-        if ! gsutil ls -b gs://$SAMPLES_BUCKET > /dev/null 2>&1; then
-          echo "Creating malware samples bucket: $SAMPLES_BUCKET"
-          gsutil mb -l ${_REGION} gs://$SAMPLES_BUCKET || {
-            echo "ERROR: Failed to create malware samples bucket!"
-            exit 1
-          }
-          # Set default ACLs (private)
-          gsutil defacl set private gs://$SAMPLES_BUCKET
-          echo "Successfully created bucket: $SAMPLES_BUCKET"
-        else
-          echo "Bucket already exists: $SAMPLES_BUCKET"
-        fi
-        
-        # Create detonation results bucket with full error logging
-        if ! gsutil ls -b gs://$RESULTS_BUCKET > /dev/null 2>&1; then
-          echo "Creating detonation results bucket: $RESULTS_BUCKET"
-          gsutil mb -l ${_REGION} gs://$RESULTS_BUCKET || {
-            echo "ERROR: Failed to create detonation results bucket!"
-            exit 1
-          }
-          # Set default ACLs (private)
-          gsutil defacl set private gs://$RESULTS_BUCKET
-          echo "Successfully created bucket: $RESULTS_BUCKET"
-        else
-          echo "Bucket already exists: $RESULTS_BUCKET"
-        fi
-        
-        # Verify bucket access (critical test)
-        echo "Verifying bucket access..."
-        for BUCKET in $SAMPLES_BUCKET $RESULTS_BUCKET; do
-          echo "Testing access to: $BUCKET"
-          if ! gsutil ls -b gs://$BUCKET > /dev/null 2>&1; then
-            echo "ERROR: Cannot access bucket $BUCKET after creation!"
-            exit 1
-          fi
-          # Write test file to confirm write permissions
-          echo "test" | gsutil cp - gs://$BUCKET/test_access.txt || {
-            echo "ERROR: Cannot write to bucket $BUCKET!"
-            exit 1
-          }
-          # Delete test file
-          gsutil rm gs://$BUCKET/test_access.txt > /dev/null 2>&1
-          echo "Successfully verified access to $BUCKET"
-        done
-        
-        # Create Pub/Sub topic and subscription for notifications
-        echo "Setting up Pub/Sub..."
-        gcloud pubsub topics create detonation-notifications 2>/dev/null || echo "Topic already exists"
-        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications 2>/dev/null || echo "Subscription already exists"
-        
-        # Create service account if it doesn't exist
-        echo "Setting up service account..."
-        # Direct check without variable assignment
-        if ! gcloud iam service-accounts list --filter="email:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" --format="value(email)" | grep -q malware-platform-sa; then
-          echo "Creating service account malware-platform-sa..."
-          gcloud iam service-accounts create malware-platform-sa \
-            --display-name="Malware Detonation Platform Service Account" || echo "Failed to create service account, may already exist"
-        else
-          echo "Service account malware-platform-sa already exists"
-        fi
-        
-        # Grant IAM roles individually without --condition flag
-        echo "Granting roles to service account..."
-        
-        # Storage Admin role
-        echo "Granting Storage Admin role..."
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/storage.admin" > /dev/null 2>&1 || echo "Role binding for Storage Admin failed or already exists"
-        
-        # Pub/Sub Publisher role
-        echo "Granting Pub/Sub Publisher role..."
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/pubsub.publisher" > /dev/null 2>&1 || echo "Role binding for Pub/Sub Publisher failed or already exists"
-        
-        # Pub/Sub Subscriber role
-        echo "Granting Pub/Sub Subscriber role..."
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/pubsub.subscriber" > /dev/null 2>&1 || echo "Role binding for Pub/Sub Subscriber failed or already exists"
-        
-        # Logs Writer role
-        echo "Granting Logs Writer role..."
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/logging.logWriter" > /dev/null 2>&1 || echo "Role binding for Logs Writer failed or already exists"
-        
-        # Cloud Run Admin role
-        echo "Granting Cloud Run Admin role..."
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/run.admin" > /dev/null 2>&1 || echo "Role binding for Cloud Run Admin failed or already exists"
-        
-        # Compute Admin role
-        echo "Granting Compute Admin role..."
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/compute.admin" > /dev/null 2>&1 || echo "Role binding for Compute Admin failed or already exists"
-        
-        # Secret Manager Secret Accessor role
-        echo "Granting Secret Manager Secret Accessor role..."
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/secretmanager.secretAccessor" > /dev/null 2>&1 || echo "Role binding for Secret Manager Secret Accessor failed or already exists"
-        
-        echo "Infrastructure setup complete"
-
-  # Build the Docker image with extended timeout for large builds
+  # Build the Docker image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-image'
     args: ['build', '-t', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA', '.']
@@ -158,74 +8,66 @@ steps:
 
   # Push the image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'push-sha-image'
+    id: 'push-image'
     args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA']
 
-  # Deploy to Cloud Run with improved YAML handling
+  # Create storage buckets and service account
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'setup-resources'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Create malware samples bucket
+        gsutil mb -l $_REGION gs://malware-samples-$PROJECT_ID || echo "Bucket already exists"
+        gsutil defacl set private gs://malware-samples-$PROJECT_ID
+        
+        # Create results bucket
+        gsutil mb -l $_REGION gs://detonation-results-$PROJECT_ID || echo "Bucket already exists"
+        gsutil defacl set private gs://detonation-results-$PROJECT_ID
+        
+        # Create service account if needed
+        if ! gcloud iam service-accounts list --filter="email:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" | grep -q malware-platform-sa; then
+          gcloud iam service-accounts create malware-platform-sa --display-name="Malware Detonation Platform Service Account"
+        fi
+        
+        # Grant necessary permissions
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/storage.admin"
+          
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/pubsub.publisher"
+          
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/pubsub.subscriber"
+          
+        gcloud pubsub topics create detonation-notifications 2>/dev/null || echo "Topic exists"
+        gcloud pubsub subscriptions create detonation-app-sub --topic=detonation-notifications 2>/dev/null || echo "Subscription exists"
+
+  # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-cloud-run'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Deploying to Cloud Run..."
-        
-        # Create a simplified version of the config file to avoid YAML parsing issues
-        cat > processed_cloudrun.yaml << EOF
-        apiVersion: serving.knative.dev/v1
-        kind: Service
-        metadata:
-          name: malware-detonation-platform
-        spec:
-          template:
-            metadata:
-              annotations:
-                autoscaling.knative.dev/maxScale: "5"
-                autoscaling.knative.dev/minScale: "1"
-                run.googleapis.com/cpu-throttling: "false"
-            spec:
-              serviceAccountName: malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com
-              containerConcurrency: 80
-              timeoutSeconds: 300
-              containers:
-              - image: gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA
-                resources:
-                  limits:
-                    cpu: "2"
-                    memory: "4Gi"
-                env:
-                - name: DEBUG
-                  value: "false"
-                - name: GCP_PROJECT_ID
-                  value: "$PROJECT_ID"
-                - name: GCP_REGION
-                  value: "${_REGION}"
-                - name: GCP_STORAGE_BUCKET
-                  value: "malware-samples-$PROJECT_ID"
-                - name: GCP_RESULTS_BUCKET
-                  value: "detonation-results-$PROJECT_ID"
-                - name: MAX_CONCURRENT_DETONATIONS
-                  value: "3"
-        EOF
-        
-        echo "Simplified cloudrun.yaml created"
-        
-        # Deploy using the processed YAML file
-        echo "Deploying service to Cloud Run..."
-        gcloud run services replace processed_cloudrun.yaml \
-          --platform=managed \
-          --region=${_REGION}
-        
-        # Allow public access
-        echo "Configuring public access..."
-        gcloud run services add-iam-policy-binding malware-detonation-platform \
-          --member="allUsers" \
-          --role="roles/run.invoker" \
-          --region=${_REGION}
-          
-        echo "Deployment to Cloud Run complete"
+        # Deploy to Cloud Run using direct gcloud command
+        gcloud run deploy malware-detonation-platform \
+          --image gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA \
+          --platform managed \
+          --region $_REGION \
+          --service-account malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com \
+          --allow-unauthenticated \
+          --memory 4Gi \
+          --cpu 2 \
+          --timeout 300s \
+          --concurrency 80 \
+          --set-env-vars="GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=$_REGION,GCP_STORAGE_BUCKET=malware-samples-$PROJECT_ID,GCP_RESULTS_BUCKET=detonation-results-$PROJECT_ID,MAX_CONCURRENT_DETONATIONS=3,DEBUG=false"
 
-  # Tag the image as latest for future reference
+  # Tag the image as latest
   - name: 'gcr.io/cloud-builders/docker'
     id: 'tag-latest'
     args: ['tag', 'gcr.io/$PROJECT_ID/malware-detonation-platform:$COMMIT_SHA', 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest']
@@ -235,36 +77,24 @@ steps:
     id: 'push-latest'
     args: ['push', 'gcr.io/$PROJECT_ID/malware-detonation-platform:latest']
 
-  # Verify deployment success - ultra simplified to avoid ANY variable assignments
+  # Show deployed service URL
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'verify-deployment'
+    id: 'show-url'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        echo "Verifying deployment..."
-        
-        # Wait a moment for deployment to stabilize
-        sleep 10
-        
-        # Get service URL and print directly - no variables
-        echo "Service URL Info:"
-        gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null || echo "Service URL not available"
-        
-        # Create and display bucket names directly
+        echo "✅ Deployment complete!"
+        echo "Service URL:"
+        gcloud run services describe malware-detonation-platform --region=$_REGION --format='value(status.url)'
         echo "Storage Buckets:"
         echo "- Malware samples: gs://malware-samples-$PROJECT_ID"
         echo "- Detonation results: gs://detonation-results-$PROJECT_ID"
-        
-        # Final deployment message
-        echo "====================================="
-        echo "Deployment complete!"
-        echo "====================================="
 
 # Configuration options
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_8'  # More powerful machine for faster builds
+  machineType: 'E2_HIGHCPU_8'
   dynamicSubstitutions: true
 
 # Images to push
@@ -276,5 +106,5 @@ images:
 substitutions:
   _REGION: us-central1
 
-# Extended build timeout (60 minutes)
+# Build timeout
 timeout: '3600s'
