@@ -28,7 +28,6 @@ def init_app(app):
         generate_templates()
         
         # Initialize GCP environment variables if not set
-        # This is the key fix - we're setting GCP_PROJECT_ID if not present
         if 'GCP_PROJECT_ID' not in app.config or not app.config['GCP_PROJECT_ID']:
             # Try to get from environment variable
             project_id = os.environ.get('GCP_PROJECT_ID') or os.environ.get('GOOGLE_CLOUD_PROJECT')
@@ -379,19 +378,6 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
     # Create the VM using proper API methods
     instance_client = compute_v1.InstancesClient()
     
-    # Create instance with metadata
-    metadata_items = [
-        {"key": "job-uuid", "value": job_uuid},
-        {"key": "sample-sha256", "value": sample['sha256']},
-        {"key": "sample-path", "value": sample['storage_path']},
-        {"key": "results-bucket", "value": current_app.config['GCP_RESULTS_BUCKET']},
-        {"key": "job-id", "value": str(job_id)},
-        {"key": "detonation-timeout", "value": str(current_app.config.get('DETONATION_TIMEOUT_MINUTES', 30))},
-        {"key": "project-id", "value": project_id},
-        {"key": "shutdown-script", "value": create_shutdown_script()},
-        {"key": "health-check-interval", "value": "60"}
-    ]
-    
     # Create and start the VM with retry logic
     retry_attempts = 3
     for attempt in range(retry_attempts):
@@ -412,20 +398,23 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
             request.instance_resource.metadata = compute_v1.Metadata()
             request.instance_resource.metadata.items = []
             
+            metadata_items = [
+                {"key": "job-uuid", "value": job_uuid},
+                {"key": "sample-sha256", "value": sample['sha256']},
+                {"key": "sample-path", "value": sample['storage_path']},
+                {"key": "results-bucket", "value": current_app.config['GCP_RESULTS_BUCKET']},
+                {"key": "job-id", "value": str(job_id)},
+                {"key": "detonation-timeout", "value": str(current_app.config.get('DETONATION_TIMEOUT_MINUTES', 30))},
+                {"key": "project-id", "value": project_id},
+                {"key": "shutdown-script", "value": create_shutdown_script()},
+                {"key": "health-check-interval", "value": "60"}
+            ]
+            
             for item in metadata_items:
                 metadata_item = compute_v1.Metadata.Item()
                 metadata_item.key = item["key"]
                 metadata_item.value = item["value"]
                 request.instance_resource.metadata.items.append(metadata_item)
-            
-            # Add labels
-            request.instance_resource.labels = {
-                "purpose": "malware-detonation",
-                "job-id": str(job_id),
-                "vm-type": vm_type.replace('-', '_'),
-                "created-by": "huntcraft",
-                "auto-delete": "true"
-            }
             
             # Execute the request
             operation = instance_client.insert(request=request)
