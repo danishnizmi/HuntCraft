@@ -1,36 +1,24 @@
 from flask import Blueprint, request, render_template, current_app, jsonify, flash, redirect, url_for
 import sqlite3, json, time, logging, uuid, os, threading
 from datetime import datetime
+from google.cloud import compute_v1, storage, pubsub_v1
 
-# Set up logger first to capture import errors
+# Set up logger
 logger = logging.getLogger(__name__)
 
-# Create blueprint immediately
+# Create blueprint
 detonation_bp = Blueprint('detonation', __name__, url_prefix='/detonation')
-
-# Try to import Google Cloud dependencies with better error handling
-GCP_ENABLED = True
-try:
-    from google.cloud import compute_v1, storage, pubsub_v1
-except ImportError:
-    GCP_ENABLED = False
-    logger.warning("Google Cloud dependencies not available. Some detonation features will be limited.")
 
 # Global jobs tracker
 active_jobs = {}
 
 def init_app(app):
     """Initialize module with Flask app"""
-    # Register blueprint first to avoid initialization issues
     try:
+        # Register blueprint
         app.register_blueprint(detonation_bp)
         logger.info("Detonation blueprint registered successfully")
-    except Exception as e:
-        logger.error(f"Failed to register detonation blueprint: {e}")
-        raise
-    
-    # Continue with other initialization in a safer way
-    try:
+        
         with app.app_context():
             # Create directories
             os.makedirs('static/css', exist_ok=True)
@@ -40,66 +28,50 @@ def init_app(app):
             # Generate templates
             generate_templates()
             
-            # Set up Pub/Sub if running in production and GCP is available
-            if app.config.get('ON_CLOUD_RUN', False) and GCP_ENABLED:
+            # Set up Pub/Sub if running in production
+            if app.config.get('ON_CLOUD_RUN', False):
                 ensure_pubsub_topic()
                 setup_pubsub_subscription()
             
         logger.info("Detonation module initialized successfully")
     except Exception as e:
         logger.error(f"Error in detonation module initialization: {e}")
-        # Don't re-raise to allow app to start with limited functionality
+        raise
 
 def create_database_schema(cursor):
     """Create database tables"""
-    try:
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS detonation_jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, job_uuid TEXT NOT NULL,
-            sample_id INTEGER NOT NULL, vm_type TEXT NOT NULL, vm_name TEXT,
-            status TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            started_at TEXT, completed_at TEXT, error_message TEXT,
-            results_path TEXT, user_id INTEGER,
-            FOREIGN KEY (sample_id) REFERENCES malware_samples(id),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS detonation_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL,
-            result_type TEXT NOT NULL, result_data TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (job_id) REFERENCES detonation_jobs(id)
-        )''')
-        
-        logger.info("Detonation database schema created successfully")
-    except Exception as e:
-        logger.error(f"Error creating detonation database schema: {e}")
-        raise
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS detonation_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, job_uuid TEXT NOT NULL,
+        sample_id INTEGER NOT NULL, vm_type TEXT NOT NULL, vm_name TEXT,
+        status TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        started_at TEXT, completed_at TEXT, error_message TEXT,
+        results_path TEXT, user_id INTEGER,
+        FOREIGN KEY (sample_id) REFERENCES malware_samples(id),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )''')
+    
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS detonation_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL,
+        result_type TEXT NOT NULL, result_data TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (job_id) REFERENCES detonation_jobs(id)
+    )''')
+    
+    logger.info("Detonation database schema created successfully")
 
 def _db_connection(row_factory=None):
     """Create a database connection with optional row factory"""
-    try:
-        conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
-        if row_factory: 
-            conn.row_factory = row_factory
-        return conn
-    except Exception as e:
-        logger.error(f"Database connection error: {e}")
-        raise
+    conn = sqlite3.connect(current_app.config['DATABASE_PATH'])
+    if row_factory: 
+        conn.row_factory = row_factory
+    return conn
 
 def ensure_pubsub_topic():
     """Ensure the Pub/Sub topic for detonation notifications exists"""
-    if not GCP_ENABLED:
-        logger.warning("GCP dependencies not available. Pub/Sub features disabled.")
-        return
-        
     try:
         project_id = current_app.config['GCP_PROJECT_ID']
-        if not project_id:
-            logger.warning("Cannot set up Pub/Sub: No project ID configured")
-            return
-            
         publisher = pubsub_v1.PublisherClient()
         topic_path = publisher.topic_path(project_id, 'detonation-notifications')
         
@@ -111,19 +83,13 @@ def ensure_pubsub_topic():
             logger.info("Created detonation PubSub topic")
     except Exception as e:
         logger.error(f"Error setting up PubSub topic: {e}")
+        raise
 
 def setup_pubsub_subscription():
     """Set up Pub/Sub subscription for job updates"""
-    if not GCP_ENABLED:
-        logger.warning("GCP dependencies not available. Pub/Sub features disabled.")
-        return
-        
     try:
         project_id = current_app.config['GCP_PROJECT_ID']
-        if not project_id:
-            logger.warning("Cannot set up Pub/Sub: No project ID configured")
-            return
-            
+        
         # Create subscriber client
         subscriber = pubsub_v1.SubscriberClient()
         subscription_path = subscriber.subscription_path(project_id, 'detonation-app-sub')
@@ -134,11 +100,11 @@ def setup_pubsub_subscription():
             logger.info(f"Pub/Sub subscription already exists: {subscription_path}")
         except Exception:
             # Create subscription if it doesn't exist
-            logger.info(f"Creating new Pub/Sub subscription: {subscription_path}")
             topic_path = f"projects/{project_id}/topics/detonation-notifications"
             subscriber.create_subscription(
                 request={"name": subscription_path, "topic": topic_path}
             )
+            logger.info(f"Created new Pub/Sub subscription: {subscription_path}")
         
         # Start subscriber in a separate thread
         def callback(message):
@@ -160,6 +126,7 @@ def setup_pubsub_subscription():
         
     except Exception as e:
         logger.error(f"Error setting up Pub/Sub subscription: {e}")
+        raise
 
 # Routes
 @detonation_bp.route('/')
@@ -290,13 +257,14 @@ def api_status(job_id):
 # Core Detonation Logic
 def create_detonation_job(sample_id, vm_type):
     """Create a new detonation job and start VM deployment via GCP"""
-    if not GCP_ENABLED:
-        raise ValueError("GCP functionality is disabled. Cannot create detonation job.")
-        
     # Check if maximum concurrent detonations reached
     max_concurrent = current_app.config.get('MAX_CONCURRENT_DETONATIONS', 5)
     if len(active_jobs) >= max_concurrent:
         raise ValueError(f"Maximum concurrent detonations ({max_concurrent}) reached")
+    
+    # Verify GCP_PROJECT_ID is set
+    if not current_app.config.get('GCP_PROJECT_ID'):
+        raise ValueError("GCP_PROJECT_ID is not configured. Cannot create detonation job.")
     
     # Generate job UUID and create database record
     job_uuid = str(uuid.uuid4())
@@ -338,10 +306,7 @@ def create_detonation_job(sample_id, vm_type):
     return job_id
 
 def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
-    """Deploy a GCP VM for malware detonation with improved reliability"""
-    if not GCP_ENABLED:
-        raise ValueError("GCP functionality is disabled. Cannot deploy VM.")
-        
+    """Deploy a GCP VM for malware detonation"""
     project_id = current_app.config['GCP_PROJECT_ID']
     zone = current_app.config['GCP_ZONE']
     
@@ -364,10 +329,10 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
     
     template_url = instance_templates.get(vm_type, instance_templates['windows-10-x64'])
     
-    # Create the VM with improved metadata and reliability
+    # Create the VM
     instance_client = compute_v1.InstancesClient()
     
-    # Create instance with enhanced metadata
+    # Create instance with metadata
     instance_props = {
         "name": vm_name,
         "metadata": {
@@ -380,18 +345,17 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
                 {"key": "detonation-timeout", "value": str(current_app.config.get('DETONATION_TIMEOUT_MINUTES', 30))},
                 {"key": "project-id", "value": project_id},
                 {"key": "shutdown-script", "value": create_shutdown_script()},
-                {"key": "health-check-interval", "value": "60"},  # Check health every 60 seconds
+                {"key": "health-check-interval", "value": "60"},
             ]
         },
         "labels": {
             "purpose": "malware-detonation",
             "job-id": str(job_id),
             "vm-type": vm_type.replace('-', '_'),
-            "created-by": "huntcraft",
             "auto-delete": "true"
         },
         "scheduling": {
-            "automaticRestart": False,  # Don't restart if crashes
+            "automaticRestart": False,
             "preemptible": current_app.config.get('USE_PREEMPTIBLE_VMS', False)
         }
     }
@@ -417,7 +381,7 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
             setup_job_monitoring(job_id, vm_name)
             update_job_status(job_id, 'running', started_at=str(time.time()))
             schedule_cleanup(job_id, vm_name, 
-                            timeout_minutes=current_app.config.get('DETONATION_TIMEOUT_MINUTES', 60))
+                           timeout_minutes=current_app.config.get('DETONATION_TIMEOUT_MINUTES', 60))
             
             logger.info(f"Detonation VM {vm_name} deployed for job {job_id}")
             return
@@ -459,10 +423,6 @@ echo "Shutdown cleanup complete at $(date)"
 
 def setup_job_monitoring(job_id, vm_name):
     """Configure monitoring for the detonation job using Pub/Sub"""
-    if not GCP_ENABLED:
-        logger.warning(f"GCP functionality is disabled. Skipping job monitoring setup for job {job_id}.")
-        return
-        
     project_id = current_app.config['GCP_PROJECT_ID']
     
     # Create a Pub/Sub publisher
@@ -494,22 +454,21 @@ def schedule_cleanup(job_id, vm_name, timeout_minutes=60):
             logger.warning(f"Job {job_id} (VM {vm_name}) timed out after {timeout_minutes} minutes")
             
             try:
-                # Force VM deletion if GCP is enabled
-                if GCP_ENABLED:
-                    project_id = current_app.config['GCP_PROJECT_ID']
-                    zone = current_app.config['GCP_ZONE']
-                    
-                    instance_client = compute_v1.InstancesClient()
-                    instance_client.delete(
-                        project=project_id,
-                        zone=zone,
-                        instance=vm_name
-                    )
+                # Force VM deletion
+                project_id = current_app.config['GCP_PROJECT_ID']
+                zone = current_app.config['GCP_ZONE']
+                
+                instance_client = compute_v1.InstancesClient()
+                instance_client.delete(
+                    project=project_id,
+                    zone=zone,
+                    instance=vm_name
+                )
                 
                 # Update job status to timed out
                 update_job_status(job_id, 'failed', 
-                                 error_message=f"Detonation timed out after {timeout_minutes} minutes",
-                                 completed_at=str(time.time()))
+                                error_message=f"Detonation timed out after {timeout_minutes} minutes",
+                                completed_at=str(time.time()))
                 
                 logger.info(f"Cleaned up timed out VM {vm_name} for job {job_id}")
             except Exception as e:
@@ -558,7 +517,7 @@ def update_job_status(job_id, status, started_at=None, completed_at=None, error_
         logger.info(f"Updated job {job_id} status to {status}")
         
         # If job completed or failed, notify via Pub/Sub
-        if status in ['completed', 'failed', 'cancelled'] and GCP_ENABLED:
+        if status in ['completed', 'failed', 'cancelled']:
             notify_job_completed(job_id, status)
             
     except Exception as e:
@@ -569,10 +528,6 @@ def update_job_status(job_id, status, started_at=None, completed_at=None, error_
 
 def notify_job_completed(job_id, status):
     """Notify job completion via Pub/Sub"""
-    if not GCP_ENABLED:
-        logger.warning(f"GCP functionality is disabled. Skipping completion notification for job {job_id}.")
-        return
-        
     try:
         project_id = current_app.config['GCP_PROJECT_ID']
         publisher = pubsub_v1.PublisherClient()
@@ -633,11 +588,7 @@ def handle_job_update(message):
         logger.error(f"Error handling job update: {e}")
 
 def process_detonation_results(job_id, results_path):
-    """Process and store detonation results with enhanced error handling"""
-    if not GCP_ENABLED:
-        logger.warning(f"GCP functionality is disabled. Skipping results processing for job {job_id}.")
-        return
-        
+    """Process and store detonation results"""
     try:
         # Get the results from GCS
         storage_client = storage.Client()
@@ -698,7 +649,6 @@ def process_detonation_results(job_id, results_path):
                     logger.error(f"Visualization generation error: {viz_error}")
         else:
             logger.error(f"No summary.json found for job {job_id} at {summary_blob_name}")
-            # Create a minimal error summary
             record_error_result(job_id, "No summary.json found in results")
     except Exception as e:
         logger.error(f"Error processing results for job {job_id}: {e}")
@@ -720,9 +670,6 @@ def record_error_result(job_id, error_message):
 
 def extract_artifacts_from_results(bucket, results_path):
     """Extract important artifacts from detonation results"""
-    if not GCP_ENABLED:
-        return {}
-        
     artifacts = {}
     
     # Check for common artifact files
@@ -747,8 +694,8 @@ def cancel_detonation_job(job_id):
     if not job:
         return False
     
-    # Delete VM if it exists and GCP is enabled
-    if job['vm_name'] and GCP_ENABLED:
+    # Delete VM if it exists
+    if job['vm_name']:
         try:
             project_id = current_app.config['GCP_PROJECT_ID']
             zone = current_app.config['GCP_ZONE']
@@ -785,8 +732,8 @@ def delete_detonation_job(job_id):
     if job['status'] in ['queued', 'deploying', 'running']:
         cancel_detonation_job(job_id)
     
-    # Delete results from GCS if GCP is enabled
-    if (job['results_path'] or job['job_uuid']) and GCP_ENABLED:
+    # Delete results from GCS
+    if (job['results_path'] or job['job_uuid']):
         try:
             storage_client = storage.Client()
             bucket = storage_client.bucket(current_app.config['GCP_RESULTS_BUCKET'])
@@ -855,21 +802,6 @@ def get_job_by_id(job_id):
         return dict(job) if job else None
     except Exception as e:
         logger.error(f"Error getting job by ID: {e}")
-        return None
-
-def get_job_uuid(job_id):
-    """Get the UUID for a job"""
-    try:
-        conn = _db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT job_uuid FROM detonation_jobs WHERE id = ?", (job_id,))
-        row = cursor.fetchone()
-        
-        conn.close()
-        return row[0] if row else None
-    except Exception as e:
-        logger.error(f"Error getting job UUID: {e}")
         return None
 
 def get_job_results(job_id):
@@ -1334,11 +1266,8 @@ def generate_templates():
     }
     
     # Create templates if they don't exist
-    try:
-        for filename, content in templates.items():
-            if not os.path.exists(f'templates/{filename}'):
-                with open(f'templates/{filename}', 'w') as f:
-                    f.write(content)
-                logger.info(f"Created template: {filename}")
-    except Exception as e:
-        logger.error(f"Error generating templates: {e}")
+    for filename, content in templates.items():
+        if not os.path.exists(f'templates/{filename}'):
+            with open(f'templates/{filename}', 'w') as f:
+                f.write(content)
+            logger.info(f"Created template: {filename}")
