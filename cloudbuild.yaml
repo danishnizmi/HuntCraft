@@ -132,17 +132,7 @@ steps:
           --cpu 2 \
           --timeout 300s \
           --concurrency 80 \
-          --set-env-vars="GCP_PROJECT_ID=$PROJECT_ID,\
-GCP_REGION=$_REGION,\
-GCP_ZONE=$_ZONE,\
-GCP_STORAGE_BUCKET=malware-samples-$PROJECT_ID,\
-GCP_RESULTS_BUCKET=detonation-results-$PROJECT_ID,\
-MAX_CONCURRENT_DETONATIONS=3,\
-DETONATION_TIMEOUT_MINUTES=60,\
-GENERATE_TEMPLATES=true,\
-INITIALIZE_GCP=true,\
-ON_CLOUD_RUN=true,\
-DEBUG=false"
+          --set-env-vars="GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=$_REGION,GCP_ZONE=$_ZONE,GCP_STORAGE_BUCKET=malware-samples-$PROJECT_ID,GCP_RESULTS_BUCKET=detonation-results-$PROJECT_ID,MAX_CONCURRENT_DETONATIONS=3,DETONATION_TIMEOUT_MINUTES=60,GENERATE_TEMPLATES=true,INITIALIZE_GCP=true,ON_CLOUD_RUN=true,DEBUG=false"
 
   # Tag the image as latest
   - name: 'gcr.io/cloud-builders/docker'
