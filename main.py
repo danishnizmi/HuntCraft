@@ -6,8 +6,9 @@ import time
 import sys
 import traceback
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Configure logging with more detailed format
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Core module configuration
@@ -18,8 +19,7 @@ MODULES = {
     'viz': 'viz_module'
 }
 
-# Module initialization order - ensures dependencies are loaded properly
-# IMPORTANT: web module must be first to properly handle the root route
+# CRITICAL: Module initialization order - web module MUST be first to handle the root route
 MODULE_INIT_ORDER = ['web', 'malware', 'detonation', 'viz']
 
 # Track module initialization status
@@ -434,46 +434,6 @@ def detect_installed_features():
     logger.info(f"Feature detection completed: {features}")
     return features
 
-def integrate_script(script_name):
-    """Safely import a script from the scripts directory
-    
-    Args:
-        script_name (str): Name of the script without .py extension
-        
-    Returns:
-        module or None: Imported module if successful, None otherwise
-    """
-    try:
-        # Check if script exists
-        script_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 
-            'scripts', 
-            f"{script_name}.py"
-        )
-        
-        if not os.path.exists(script_path):
-            logger.warning(f"Script {script_name}.py not found at {script_path}")
-            return None
-            
-        # Import the script
-        script_module = importlib.import_module(f"scripts.{script_name}")
-        logger.info(f"Successfully integrated script: {script_name}")
-        return script_module
-    except ImportError as e:
-        logger.warning(f"Could not import script {script_name}: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Error integrating script {script_name}: {e}")
-        return None
-
-def get_sanitizer():
-    """Get sanitizer module from scripts directory"""
-    return integrate_script("sanitizer")
-    
-def get_reporting():
-    """Get reporting module from scripts directory"""
-    return integrate_script("reporting")
-
 def register_health_check(app):
     """Register a comprehensive health check endpoint
     
@@ -549,7 +509,9 @@ def create_app(test_config=None):
             'GENERATE_TEMPLATES': os.environ.get('GENERATE_TEMPLATES', 'True').lower() in ('true', '1', 't'),
             'INITIALIZE_GCP': os.environ.get('INITIALIZE_GCP', 'False').lower() in ('true', '1', 't'),
             'SKIP_DB_INIT': os.environ.get('SKIP_DB_INIT', 'False').lower() in ('true', '1', 't'),
-            'START_TIME': start_time
+            'START_TIME': start_time,
+            # Add critical for login
+            'SECRET_KEY': os.environ.get('SECRET_KEY', os.urandom(24).hex())
         })
         
         # Set MAX_CONTENT_LENGTH based on MAX_UPLOAD_SIZE_MB
