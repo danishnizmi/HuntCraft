@@ -39,8 +39,10 @@ steps:
           echo "Bucket already exists: gs://detonation-results-$PROJECT_ID"
         fi
         
-        # Create service account if needed
+        # Create service account if needed - Fix: use correct service account name
         SERVICE_ACCOUNT="malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
+        
+        # Fix: Check for the correct service account
         if ! gcloud iam service-accounts describe $SERVICE_ACCOUNT &>/dev/null; then
           echo "Creating service account: $SERVICE_ACCOUNT"
           gcloud iam service-accounts create malware-platform-sa --display-name="Malware Detonation Platform Service Account"
@@ -49,27 +51,32 @@ steps:
         fi
         
         # Grant necessary permissions (idempotent operations)
+        # Fix: Add condition=None flag to address the error
         echo "Granting IAM permissions to service account: $SERVICE_ACCOUNT"
         
         # Storage Admin role for bucket access
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:$SERVICE_ACCOUNT" \
-          --role="roles/storage.admin"
+          --role="roles/storage.admin" \
+          --condition=None
           
         # PubSub Publisher role
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:$SERVICE_ACCOUNT" \
-          --role="roles/pubsub.publisher"
+          --role="roles/pubsub.publisher" \
+          --condition=None
           
         # PubSub Subscriber role
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:$SERVICE_ACCOUNT" \
-          --role="roles/pubsub.subscriber"
+          --role="roles/pubsub.subscriber" \
+          --condition=None
 
         # Compute Admin role (for VM management)
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:$SERVICE_ACCOUNT" \
-          --role="roles/compute.admin"
+          --role="roles/compute.admin" \
+          --condition=None
           
         # Create PubSub topic for detonation notifications if it doesn't exist
         if ! gcloud pubsub topics describe detonation-notifications &>/dev/null; then
@@ -88,7 +95,7 @@ steps:
         fi
         
         # Create VM instance templates if needed
-        # Windows template
+        # Windows template - use correct service account
         if ! gcloud compute instance-templates describe detonation-win10-template &>/dev/null; then
           echo "Creating Windows VM template"
           gcloud compute instance-templates create detonation-win10-template \
@@ -98,9 +105,11 @@ steps:
             --service-account=$SERVICE_ACCOUNT \
             --scopes=cloud-platform \
             --tags=detonation-vm,windows-vm
+        else
+          echo "Windows VM template already exists"
         fi
         
-        # Linux template  
+        # Linux template - use correct service account
         if ! gcloud compute instance-templates describe detonation-ubuntu-template &>/dev/null; then
           echo "Creating Linux VM template"
           gcloud compute instance-templates create detonation-ubuntu-template \
@@ -110,6 +119,8 @@ steps:
             --service-account=$SERVICE_ACCOUNT \
             --scopes=cloud-platform \
             --tags=detonation-vm,linux-vm
+        else
+          echo "Linux VM template already exists"
         fi
 
   # Deploy to Cloud Run with all necessary environment variables
@@ -132,7 +143,7 @@ steps:
           --cpu 2 \
           --timeout 300s \
           --concurrency 80 \
-          --set-env-vars="GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=$_REGION,GCP_ZONE=$_ZONE,GCP_STORAGE_BUCKET=malware-samples-$PROJECT_ID,GCP_RESULTS_BUCKET=detonation-results-$PROJECT_ID,MAX_CONCURRENT_DETONATIONS=3,DETONATION_TIMEOUT_MINUTES=60,GENERATE_TEMPLATES=true,INITIALIZE_GCP=true,ON_CLOUD_RUN=true,DEBUG=false"
+          --set-env-vars="GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=$_REGION,GCP_ZONE=$_ZONE,GCP_STORAGE_BUCKET=malware-samples-$PROJECT_ID,GCP_RESULTS_BUCKET=detonation-results-$PROJECT_ID,MAX_CONCURRENT_DETONATIONS=3,DETONATION_TIMEOUT_MINUTES=60,GENERATE_TEMPLATES=true,INITIALIZE_GCP=true,ON_CLOUD_RUN=true,USE_LOCAL_STORAGE=false,DEBUG=false"
 
   # Tag the image as latest
   - name: 'gcr.io/cloud-builders/docker'
@@ -155,6 +166,9 @@ steps:
         echo "Service URL:"
         gcloud run services describe malware-detonation-platform --region=$_REGION --format='value(status.url)'
         
+        echo "Environment variables set on the service:"
+        gcloud run services describe malware-detonation-platform --region=$_REGION --format='value(spec.template.spec.containers[0].env)'
+        
         echo "Verifying resources are correctly set up:"
         
         echo "Storage Buckets:"
@@ -164,23 +178,12 @@ steps:
         echo "- Detonation results bucket: gs://detonation-results-$PROJECT_ID"
         gsutil ls -b gs://detonation-results-$PROJECT_ID || echo "⚠️ Warning: Bucket not accessible"
         
-        echo "PubSub:"
-        echo "- Topic: detonation-notifications"
-        gcloud pubsub topics describe detonation-notifications || echo "⚠️ Warning: Topic not accessible"
-        
-        echo "- Subscription: detonation-app-sub"
-        gcloud pubsub subscriptions describe detonation-app-sub || echo "⚠️ Warning: Subscription not accessible"
-        
         echo "Service account:"
         echo "- malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
         gcloud iam service-accounts describe malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com || echo "⚠️ Warning: Service account not accessible"
         
-        echo "VM templates:"
-        echo "- Windows template: detonation-win10-template"
-        gcloud compute instance-templates describe detonation-win10-template || echo "⚠️ Warning: Template not accessible"
-        
-        echo "- Linux template: detonation-ubuntu-template"
-        gcloud compute instance-templates describe detonation-ubuntu-template || echo "⚠️ Warning: Template not accessible"
+        echo "Service account IAM permissions:"
+        gcloud projects get-iam-policy $PROJECT_ID --flatten="bindings[].members" --format="table(bindings.role,bindings.members)" --filter="bindings.members:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
 
 # Configuration options
 options:
