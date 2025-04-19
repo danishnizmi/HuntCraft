@@ -22,11 +22,15 @@ def get_db():
             # Connect to the database with retry mechanism
             max_retries = 3
             retry_delay = 1  # seconds
+            db_path = current_app.config['DATABASE_PATH']
+            
+            # Ensure the database directory exists
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
             
             for attempt in range(max_retries):
                 try:
                     g.db = sqlite3.connect(
-                        current_app.config['DATABASE_PATH'],
+                        db_path,
                         detect_types=sqlite3.PARSE_DECLTYPES,
                         timeout=30  # Increase timeout for busy database
                     )
@@ -80,8 +84,13 @@ def get_db_connection(row_factory=sqlite3.Row):
     """
     conn = None
     try:
+        db_path = current_app.config['DATABASE_PATH']
+        
+        # Ensure the database directory exists
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        
         conn = sqlite3.connect(
-            current_app.config['DATABASE_PATH'],
+            db_path,
             detect_types=sqlite3.PARSE_DECLTYPES,
             timeout=30
         )
@@ -183,24 +192,63 @@ def init_db_command():
 def check_database_health():
     """Check database health for monitoring."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Run integrity check
-        cursor.execute("PRAGMA integrity_check")
-        integrity_result = cursor.fetchone()[0]
-        
-        # Check foreign keys
-        cursor.execute("PRAGMA foreign_key_check")
-        fk_violations = cursor.fetchall()
-        
-        conn.close()
-        
-        return {
-            "status": "healthy" if integrity_result == "ok" and not fk_violations else "degraded",
-            "integrity": integrity_result,
-            "foreign_key_violations": len(fk_violations) 
-        }
+        # First check if database file exists
+        db_path = current_app.config.get('DATABASE_PATH')
+        if not os.path.exists(db_path):
+            return {
+                "status": "degraded",
+                "error": "Database file does not exist",
+                "path": db_path
+            }
+            
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if any tables exist
+            cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table'")
+            table_count = cursor.fetchone()[0]
+            if table_count == 0:
+                return {
+                    "status": "degraded",
+                    "error": "No tables exist in database",
+                    "path": db_path
+                }
+            
+            # Run integrity check
+            cursor.execute("PRAGMA integrity_check")
+            integrity_result = cursor.fetchone()[0]
+            
+            # Check foreign keys
+            cursor.execute("PRAGMA foreign_key_check")
+            fk_violations = cursor.fetchall()
+            
+            # Check users table
+            user_table_exists = False
+            admin_exists = False
+            try:
+                cursor.execute("SELECT COUNT(*) FROM users")
+                user_count = cursor.fetchone()[0]
+                user_table_exists = True
+                
+                cursor.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
+                admin_exists = cursor.fetchone()[0] > 0
+            except:
+                user_count = 0
+            
+            # Build comprehensive health report
+            health_status = "healthy"
+            if integrity_result != "ok" or fk_violations or not user_table_exists or not admin_exists:
+                health_status = "degraded"
+                
+            return {
+                "status": health_status,
+                "integrity": integrity_result,
+                "foreign_key_violations": len(fk_violations),
+                "table_count": table_count,
+                "user_table_exists": user_table_exists,
+                "user_count": user_count if user_table_exists else 0,
+                "admin_user_exists": admin_exists
+            }
     except Exception as e:
         logger.error(f"Database health check failed: {str(e)}")
         return {
@@ -218,10 +266,14 @@ def ensure_db_directory_exists(app):
         logger.info(f"Ensured database directory exists: {db_dir}")
         
         # Verify directory is writeable
-        test_file = os.path.join(db_dir, '.write_test')
-        with open(test_file, 'w') as f:
-            f.write('test')
-        os.remove(test_file)
+        try:
+            test_file = os.path.join(db_dir, '.write_test')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+        except Exception as e:
+            logger.error(f"Directory exists but is not writeable: {str(e)}")
+            raise
     except Exception as e:
         logger.error(f"Error ensuring database directory exists or is writeable: {str(e)}")
         raise
@@ -242,44 +294,77 @@ def init_app(app):
     # Check database initialization on startup 
     with app.app_context():
         # Check if database directory exists first
-        ensure_db_directory_exists(app)
-        
-        # Check if database exists and has required tables
+        try:
+            ensure_db_directory_exists(app)
+        except Exception as e:
+            logger.error(f"Fatal error ensuring database directory: {e}")
+            # Continue startup but log this as a critical issue
+            logger.critical("Application may fail due to database directory issues")
+            return
+            
+        # Check if database exists
         db_path = app.config.get('DATABASE_PATH')
-        needs_init = not os.path.exists(db_path)
+        db_exists = os.path.exists(db_path)
+        
+        if not db_exists:
+            logger.info(f"Database file doesn't exist at {db_path}, creating it")
+            try:
+                # Create an empty database file
+                conn = sqlite3.connect(db_path)
+                conn.close()
+                logger.info(f"Created empty database at {db_path}")
+            except Exception as e:
+                logger.error(f"Error creating empty database: {e}")
+                # Continue startup but log as critical issue
+                logger.critical("Application may fail due to database creation issues")
+                return
         
         # Skip heavy database initialization if running in a container
         # where initialization should happen during build
         skip_init = app.config.get('SKIP_DB_INIT', False)
         
-        if needs_init and not skip_init:
-            logger.info("Database does not exist. Creating and initializing...")
-            try:
-                init_db()
-            except Exception as e:
-                logger.error(f"Error during database initialization: {str(e)}")
-                # Continue startup even if initialization fails, 
-                # we'll handle missing tables at runtime
-        elif not skip_init:
-            # Check if required tables exist
+        if not skip_init:
+            # Connect to the database and ensure tables exist
             try:
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
                     
-                    # Check for core tables - can be customized for your specific app
-                    core_tables = ['users', 'malware_samples', 'detonation_jobs']
-                    missing_tables = []
+                    # Check if any tables exist
+                    cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table'")
+                    table_count = cursor.fetchone()[0]
                     
-                    for table in core_tables:
-                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
-                        if not cursor.fetchone():
-                            missing_tables.append(table)
-                    
-                    if missing_tables:
-                        logger.warning(f"Required tables missing: {', '.join(missing_tables)}. Initializing database...")
+                    if table_count == 0:
+                        logger.info("Database exists but has no tables. Initializing schema.")
                         init_db()
                     else:
-                        logger.info("Database check successful - required tables exist")
+                        # Check for core tables
+                        core_tables = ['users', 'malware_samples', 'detonation_jobs']
+                        missing_tables = []
+                        
+                        for table in core_tables:
+                            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+                            if not cursor.fetchone():
+                                missing_tables.append(table)
+                        
+                        if missing_tables:
+                            logger.warning(f"Required tables missing: {', '.join(missing_tables)}. Initializing database.")
+                            init_db()
+                        else:
+                            # Ensure admin user exists
+                            cursor.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
+                            if cursor.fetchone()[0] == 0:
+                                logger.warning("Admin user doesn't exist, creating it")
+                                # Import here to avoid circular imports
+                                from werkzeug.security import generate_password_hash
+                                # Create default admin user
+                                cursor.execute(
+                                    "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                                    ("admin", generate_password_hash("admin123"), "admin")
+                                )
+                                conn.commit()
+                                logger.info("Created default admin user")
+                            else:
+                                logger.info("Database check successful - required tables and admin user exist")
             except Exception as e:
                 logger.error(f"Error checking database tables: {str(e)}")
                 if not skip_init:
@@ -289,6 +374,7 @@ def init_app(app):
                         init_db()
                     except Exception as init_err:
                         logger.error(f"Error during database reinitialization: {str(init_err)}")
+                        logger.critical("Application may have database integrity issues")
 
 @click.command('check-db')
 @with_appcontext
@@ -322,6 +408,20 @@ def check_db_command():
         click.echo("Tables in database:")
         for table in tables:
             click.echo(f"  - {table[0]}")
+            
+            # Get row count
+            try:
+                cursor.execute(f"SELECT COUNT(*) FROM {table[0]}")
+                row_count = cursor.fetchone()[0]
+                click.echo(f"    Rows: {row_count}")
+                
+                # If users table, show number of users
+                if table[0] == 'users':
+                    cursor.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
+                    admin_count = cursor.fetchone()[0]
+                    click.echo(f"    Admin users: {admin_count}")
+            except:
+                click.echo(f"    Could not count rows")
             
     except Exception as e:
         click.echo(f"Database check failed: {str(e)}", err=True)
