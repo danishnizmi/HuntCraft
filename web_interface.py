@@ -43,14 +43,17 @@ def init_app(app):
         # Generate necessary templates and static files
         with app.app_context():
             # Ensure database directory exists
-            os.makedirs(os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')), exist_ok=True)
+            db_dir = os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db'))
+            os.makedirs(db_dir, exist_ok=True)
             
-            # Ensure the database has been initialized
-            if not os.path.exists(app.config.get('DATABASE_PATH')):
-                init_db(app)
+            # Ensure the database has been initialized with the user table
+            ensure_db_tables(app)
             
             # Generate templates
             generate_base_templates()
+            
+            # Generate basic CSS and JS
+            generate_static_files()
             
             logger.info("Web interface module initialized successfully")
         
@@ -121,35 +124,59 @@ def load_user(user_id):
         logger.error(f"Error loading user: {e}")
     return None
 
-def init_db(app):
-    """Initialize the database with schema"""
-    logger.info("Initializing database")
+def ensure_db_tables(app):
+    """Ensure database tables exist and admin user is created"""
+    logger.info("Checking and initializing database tables")
     try:
-        conn = sqlite3.connect(app.config.get('DATABASE_PATH'))
+        # Check if the database file exists
+        db_path = app.config.get('DATABASE_PATH')
+        
+        if not os.path.exists(db_path):
+            logger.info(f"Database file doesn't exist at {db_path}, creating it")
+            # Create the directory if it doesn't exist
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        
+        # Connect to database
+        conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        # Create users table
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
+        # Check if users table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+        table_exists = cursor.fetchone() is not None
         
-        # Create default admin user if no users exist
-        cursor.execute("SELECT COUNT(*) FROM users")
-        if cursor.fetchone()[0] == 0:
+        if not table_exists:
+            logger.info("Users table doesn't exist, creating it")
+            # Create users table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                role TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            # Create default admin user
             cursor.execute(
                 "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
                 ("admin", generate_password_hash("admin123"), "admin")
             )
             logger.info("Created default admin user")
+        else:
+            # Check if admin user exists
+            cursor.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
+            admin_exists = cursor.fetchone()[0] > 0
+            
+            if not admin_exists:
+                logger.info("Admin user doesn't exist, creating it")
+                cursor.execute(
+                    "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                    ("admin", generate_password_hash("admin123"), "admin")
+                )
         
         conn.commit()
         conn.close()
-        logger.info("Database initialization complete")
+        logger.info("Database tables initialization complete")
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
         raise
@@ -183,7 +210,11 @@ def create_database_schema(cursor):
 def _db_connection(row_factory=None):
     """Create a database connection with optional row factory"""
     try:
-        conn = sqlite3.connect(current_app.config.get('DATABASE_PATH'))
+        db_path = current_app.config.get('DATABASE_PATH')
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        
+        conn = sqlite3.connect(db_path)
         if row_factory:
             conn.row_factory = row_factory
         return conn
@@ -271,8 +302,22 @@ def login():
             password = request.form.get('password')
             remember = 'remember' in request.form
             
+            # Ensure database exists before trying to login
+            db_path = current_app.config.get('DATABASE_PATH')
+            if not os.path.exists(db_path):
+                logger.warning(f"Database file not found at {db_path}, initializing it")
+                ensure_db_tables(current_app)
+            
             conn = _db_connection()
             cursor = conn.cursor()
+            
+            # Check if users table exists
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+            if cursor.fetchone() is None:
+                logger.warning("Users table doesn't exist, creating it")
+                create_database_schema(cursor)
+                conn.commit()
+            
             cursor.execute("SELECT id, username, password, role FROM users WHERE username = ?", (username,))
             user_data = cursor.fetchone()
             conn.close()
@@ -287,6 +332,12 @@ def login():
                     next_page = url_for('web.dashboard')
                 return redirect(next_page)
             
+            # Debug output when login fails
+            if user_data:
+                logger.warning(f"Login failed for user {username}: Password hash verification failed")
+            else:
+                logger.warning(f"Login failed for user {username}: User not found")
+                
             error = 'Invalid username or password'
         except Exception as e:
             logger.error(f"Login error: {e}")
@@ -430,86 +481,34 @@ def users():
         logger.error(f"Error rendering users template: {e}")
         return redirect(url_for('web.dashboard'))
 
-@web_bp.route('/users/add', methods=['GET', 'POST'])
-@login_required
-@admin_required
-def add_user():
-    """Add new user - admin only"""
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        role = request.form.get('role', 'analyst')
-        
-        if not username or not password:
-            flash('Username and password are required', 'danger')
-            return redirect(url_for('web.add_user'))
-        
-        try:
-            # Check if username already exists
-            conn = _db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
-            if cursor.fetchone():
-                conn.close()
-                flash('Username already exists', 'danger')
-                return redirect(url_for('web.add_user'))
-            
-            # Create new user
-            cursor.execute(
-                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                (username, generate_password_hash(password), role)
-            )
-            conn.commit()
-            conn.close()
-            flash('User created successfully', 'success')
-            return redirect(url_for('web.users'))
-        except Exception as e:
-            logger.error(f"Error creating user: {e}")
-            flash(f'Error creating user', 'danger')
-    
-    try:
-        return render_template('user_form.html', user=None)
-    except Exception as e:
-        logger.error(f"Error rendering user form template: {e}")
-        return redirect(url_for('web.users'))
-
-@web_bp.route('/infrastructure')
-@login_required
-@admin_required
-def infrastructure():
-    """Infrastructure management page"""
-    try:
-        # Get GCP project info
-        project_id = current_app.config.get('GCP_PROJECT_ID', 'Not configured')
-        region = current_app.config.get('GCP_REGION', 'us-central1')
-        
-        # Get storage bucket info
-        samples_bucket = current_app.config.get('GCP_STORAGE_BUCKET', 'Not configured')
-        results_bucket = current_app.config.get('GCP_RESULTS_BUCKET', 'Not configured')
-        
-        # Get VM configuration
-        vm_network = current_app.config.get('VM_NETWORK', 'detonation-network')
-        vm_subnet = current_app.config.get('VM_SUBNET', 'detonation-subnet')
-        vm_machine_type = current_app.config.get('VM_MACHINE_TYPE', 'e2-medium')
-        
-        return render_template('infrastructure.html', 
-                             project_id=project_id,
-                             region=region,
-                             samples_bucket=samples_bucket,
-                             results_bucket=results_bucket,
-                             vm_network=vm_network,
-                             vm_subnet=vm_subnet,
-                             vm_machine_type=vm_machine_type)
-    except Exception as e:
-        logger.error(f"Error loading infrastructure data: {e}")
-        flash("Error loading infrastructure data", "danger")
-        return redirect(url_for('web.dashboard'))
-
 @web_bp.route('/health')
 def health_check():
     """Health check endpoint"""
-    logger.info("Health check endpoint called on web blueprint")
-    return jsonify({"status": "healthy", "source": "web_blueprint"}), 200
+    # Check database health
+    try:
+        conn = _db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        user_count = cursor.fetchone()[0]
+        conn.close()
+        
+        db_status = {
+            "status": "healthy",
+            "users_table": True,
+            "user_count": user_count
+        }
+    except Exception as e:
+        db_status = {
+            "status": "unhealthy", 
+            "error": str(e)
+        }
+    
+    return jsonify({
+        "status": "healthy" if db_status["status"] == "healthy" else "degraded",
+        "source": "web_blueprint", 
+        "database": db_status,
+        "timestamp": datetime.datetime.now().isoformat()
+    })
 
 @web_bp.route('/diagnostic')
 def diagnostic():
@@ -578,6 +577,10 @@ def diagnostic():
             if diagnostics['database_info']['users_table_exists']:
                 cursor.execute("SELECT COUNT(*) FROM users")
                 diagnostics['database_info']['user_count'] = cursor.fetchone()[0]
+                
+                # Check admin user
+                cursor.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
+                diagnostics['database_info']['admin_user_exists'] = cursor.fetchone()[0] > 0
             
             conn.close()
     except Exception as e:
@@ -618,22 +621,112 @@ def recreate_templates():
     """Recreate basic templates endpoint"""
     try:
         generate_base_templates()
+        generate_static_files()
         return jsonify({"success": True, "message": "Templates recreated successfully"})
     except Exception as e:
         logger.error(f"Error recreating templates: {e}")
         return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
 
 @web_bp.route('/init-database', methods=['POST'])
-@login_required
-@admin_required
 def initialize_database():
     """Initialize database endpoint"""
     try:
-        init_db(current_app)
+        ensure_db_tables(current_app)
         return jsonify({"success": True, "message": "Database initialized successfully"})
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
+
+# Generate static files for CSS and JS
+def generate_static_files():
+    """Generate CSS and JS files if they don't exist"""
+    # CSS file
+    css_path = os.path.join(current_app.static_folder, 'css', 'main.css')
+    if not os.path.exists(css_path):
+        os.makedirs(os.path.dirname(css_path), exist_ok=True)
+        try:
+            with open(css_path, 'w') as f:
+                f.write("""/* Main CSS styles */
+body { 
+    font-family: 'Helvetica Neue', Arial, sans-serif; 
+    line-height: 1.6; 
+    color: #333; 
+    background-color: #f8f9fa; 
+}
+.card { 
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05); 
+    margin-bottom: 20px; 
+    border: none; 
+    border-radius: 8px; 
+}
+.card-header { 
+    border-top-left-radius: 8px !important; 
+    border-top-right-radius: 8px !important; 
+}
+.hash-value { 
+    font-family: monospace; 
+    word-break: break-all; 
+}
+.table-responsive { 
+    overflow-x: auto; 
+}
+footer { 
+    margin-top: 50px; 
+    padding: 20px 0; 
+    border-top: 1px solid #e9ecef; 
+}
+
+/* Enhanced error styles */
+pre {
+    background-color: #f8f9fa;
+    padding: 10px;
+    border-radius: 4px;
+    border: 1px solid #dee2e6;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+}
+""")
+            logger.info("Created main CSS file")
+        except Exception as e:
+            logger.error(f"Error creating CSS file: {e}")
+    
+    # JS file
+    js_path = os.path.join(current_app.static_folder, 'js', 'main.js')
+    if not os.path.exists(js_path):
+        os.makedirs(os.path.dirname(js_path), exist_ok=True)
+        try:
+            with open(js_path, 'w') as f:
+                f.write("""// Main JavaScript
+document.addEventListener('DOMContentLoaded', function() {
+    // Handle delete confirmations
+    const confirmButtons = document.querySelectorAll('[data-confirm]');
+    if (confirmButtons) {
+        confirmButtons.forEach(button => {
+            button.addEventListener('click', function(e) {
+                if (!confirm(this.getAttribute('data-confirm') || 'Are you sure?')) {
+                    e.preventDefault();
+                }
+            });
+        });
+    }
+    
+    // Auto-hide alerts after 5 seconds
+    const alerts = document.querySelectorAll('.alert:not(.alert-permanent)');
+    if (alerts) {
+        alerts.forEach(alert => {
+            setTimeout(function() {
+                alert.classList.add('fade');
+                setTimeout(function() { alert.remove(); }, 500);
+            }, 5000);
+        });
+    }
+});
+""")
+            logger.info("Created main JS file")
+        except Exception as e:
+            logger.error(f"Error creating JS file: {e}")
 
 # Template generation
 def generate_base_templates():
@@ -733,72 +826,6 @@ def generate_base_templates():
 </body>
 </html>""",
         
-        'index.html': """{% extends 'base.html' %}
-
-{% block title %}{{ app_name }}{% endblock %}
-
-{% block content %}
-<div class="jumbotron bg-light p-5 rounded">
-    <h1 class="display-4">Welcome to {{ app_name }}</h1>
-    <p class="lead">A secure platform for malware analysis and detonation.</p>
-    <hr class="my-4">
-    <p>Use the navigation bar above to access different features of the platform.</p>
-    {% if not current_user.is_authenticated %}
-    <a class="btn btn-primary btn-lg" href="{{ url_for('web.login') }}" role="button">Login</a>
-    {% else %}
-    <a class="btn btn-primary btn-lg" href="{{ url_for('web.dashboard') }}" role="button">Go to Dashboard</a>
-    {% endif %}
-</div>
-
-<div class="row mt-5">
-    <div class="col-md-4">
-        <div class="card">
-            <div class="card-body text-center">
-                <i class="fas fa-virus fa-3x mb-3 text-primary"></i>
-                <h5 class="card-title">Malware Analysis</h5>
-                <p class="card-text">Upload and analyze malware samples securely.</p>
-                <a href="{{ url_for('malware.index') }}" class="btn btn-outline-primary">Analyze Malware</a>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-4">
-        <div class="card">
-            <div class="card-body text-center">
-                <i class="fas fa-flask fa-3x mb-3 text-primary"></i>
-                <h5 class="card-title">Detonation Services</h5>
-                <p class="card-text">Detonate samples in an isolated environment.</p>
-                <a href="{{ url_for('detonation.index') }}" class="btn btn-outline-primary">Detonation Zone</a>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-4">
-        <div class="card">
-            <div class="card-body text-center">
-                <i class="fas fa-chart-line fa-3x mb-3 text-primary"></i>
-                <h5 class="card-title">Visualizations</h5>
-                <p class="card-text">Visualize data and create reports.</p>
-                <a href="{{ url_for('viz.index') }}" class="btn btn-outline-primary">View Analytics</a>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="row mt-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-body text-center">
-                <i class="fas fa-wrench fa-2x mb-3 text-primary"></i>
-                <h5 class="card-title">Diagnostics</h5>
-                <p class="card-text">Check system status and troubleshoot issues.</p>
-                <a href="{{ url_for('web.diagnostic') }}" class="btn btn-outline-primary">System Diagnostics</a>
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}""",
-
         'login.html': """{% extends 'base.html' %}
 
 {% block title %}Login - {{ app_name }}{% endblock %}
@@ -838,91 +865,370 @@ def generate_base_templates():
         </div>
     </div>
 </div>
-{% endblock %}"""
-    }
-    
-    static_files = {
-        'css/main.css': """/* Main CSS styles */
-body { 
-    font-family: 'Helvetica Neue', Arial, sans-serif; 
-    line-height: 1.6; 
-    color: #333; 
-    background-color: #f8f9fa; 
-}
-.card { 
-    box-shadow: 0 2px 4px rgba(0,0,0,0.05); 
-    margin-bottom: 20px; 
-    border: none; 
-    border-radius: 8px; 
-}
-.card-header { 
-    border-top-left-radius: 8px !important; 
-    border-top-right-radius: 8px !important; 
-}
-.hash-value { 
-    font-family: monospace; 
-    word-break: break-all; 
-}
-.table-responsive { 
-    overflow-x: auto; 
-}
-footer { 
-    margin-top: 50px; 
-    padding: 20px 0; 
-    border-top: 1px solid #e9ecef; 
-}
-
-/* Enhanced error styles */
-pre {
-    background-color: #f8f9fa;
-    padding: 10px;
-    border-radius: 4px;
-    border: 1px solid #dee2e6;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    max-height: 300px;
-    overflow-y: auto;
-}
-""",
+{% endblock %}""",
         
-        'js/main.js': """// Main JavaScript
-document.addEventListener('DOMContentLoaded', function() {
-    // Handle delete confirmations
-    const confirmButtons = document.querySelectorAll('[data-confirm]');
-    if (confirmButtons) {
-        confirmButtons.forEach(button => {
-            button.addEventListener('click', function(e) {
-                if (!confirm(this.getAttribute('data-confirm') || 'Are you sure?')) {
-                    e.preventDefault();
+        'error.html': """{% extends 'base.html' %}
+
+{% block title %}Error {{ error_code }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center mt-5">
+    <div class="col-md-8">
+        <div class="card text-center">
+            <div class="card-header bg-danger text-white">
+                <h2 class="card-title">Error {{ error_code }}</h2>
+            </div>
+            <div class="card-body">
+                <p class="display-1 text-danger"><i class="fas fa-exclamation-triangle"></i></p>
+                <h4>{{ error_message }}</h4>
+                <p class="text-muted">Please try again or contact your system administrator if the problem persists.</p>
+                
+                {% if error_details and config.get('DEBUG', False) %}
+                <div class="alert alert-secondary mt-4">
+                    <h5>Debug Details</h5>
+                    <pre class="text-start"><code>{{ error_details }}</code></pre>
+                </div>
+                {% endif %}
+                
+                <a href="/" class="btn btn-primary mt-3">Return to Home</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}""",
+
+        'profile.html': """{% extends 'base.html' %}
+
+{% block title %}User Profile - {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8 mx-auto">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h2 class="card-title">User Profile</h2>
+            </div>
+            <div class="card-body">
+                <div class="row mb-4">
+                    <div class="col-md-4 text-center">
+                        <i class="fas fa-user-circle fa-6x text-secondary"></i>
+                    </div>
+                    <div class="col-md-8">
+                        <h3>{{ current_user.username }}</h3>
+                        <p><strong>Role:</strong> {{ current_user.role }}</p>
+                        <p><strong>ID:</strong> {{ current_user.id }}</p>
+                    </div>
+                </div>
+                
+                <div class="mb-4">
+                    <h4>Account Settings</h4>
+                    <p>
+                        <a href="#" class="btn btn-outline-primary">
+                            <i class="fas fa-key"></i> Change Password
+                        </a>
+                    </p>
+                </div>
+                
+                <div class="mb-4">
+                    <h4>Activity</h4>
+                    <p>Recent activity will be shown here in future versions.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}""",
+
+        'users.html': """{% extends 'base.html' %}
+
+{% block title %}User Management - {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>User Management</h1>
+    <a href="{{ url_for('web.add_user') }}" class="btn btn-primary">
+        <i class="fas fa-user-plus"></i> Add User
+    </a>
+</div>
+
+{% if users %}
+    <div class="card">
+        <div class="card-header bg-primary text-white">
+            <h5 class="card-title mb-0">Users</h5>
+        </div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Username</th>
+                            <th>Role</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for user in users %}
+                        <tr>
+                            <td>{{ user.id }}</td>
+                            <td>{{ user.username }}</td>
+                            <td>{{ user.role }}</td>
+                            <td>{{ user.created_at }}</td>
+                            <td>
+                                <a href="#" class="btn btn-sm btn-info">
+                                    <i class="fas fa-edit"></i>
+                                </a>
+                                {% if user.username != 'admin' %}
+                                <a href="#" class="btn btn-sm btn-danger" data-confirm="Are you sure you want to delete this user?">
+                                    <i class="fas fa-trash"></i>
+                                </a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+{% else %}
+    <div class="alert alert-warning">
+        <i class="fas fa-exclamation-triangle"></i> No users found.
+    </div>
+{% endif %}
+{% endblock %}""",
+
+        'diagnostic.html': """{% extends 'base.html' %}
+
+{% block title %}System Diagnostics - {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>System Diagnostics</h1>
+    <div>
+        <button id="recreate-templates-btn" class="btn btn-warning">
+            <i class="fas fa-sync"></i> Recreate Templates
+        </button>
+        <button id="init-database-btn" class="btn btn-danger">
+            <i class="fas fa-database"></i> Initialize Database
+        </button>
+    </div>
+</div>
+
+<div class="row">
+    <!-- Application Info -->
+    <div class="col-md-6 mb-4">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Application Information</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tr>
+                        <th>Application Name:</th>
+                        <td>{{ diagnostics.app_info.app_name }}</td>
+                    </tr>
+                    <tr>
+                        <th>Debug Mode:</th>
+                        <td>{{ diagnostics.app_info.debug_mode }}</td>
+                    </tr>
+                    <tr>
+                        <th>Templates Path:</th>
+                        <td>{{ diagnostics.app_info.templates_path }}</td>
+                    </tr>
+                    <tr>
+                        <th>Static Path:</th>
+                        <td>{{ diagnostics.app_info.static_path }}</td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Module Status -->
+    <div class="col-md-6 mb-4">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Module Status</h5>
+            </div>
+            <div class="card-body">
+                {% if diagnostics.module_status.error %}
+                    <div class="alert alert-warning">{{ diagnostics.module_status.error }}</div>
+                {% else %}
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Module</th>
+                                <th>Status</th>
+                                <th>Error</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for module, status in diagnostics.module_status.items() %}
+                            <tr>
+                                <td>{{ module }}</td>
+                                <td>
+                                    {% if status.initialized %}
+                                        <span class="badge bg-success">Initialized</span>
+                                    {% else %}
+                                        <span class="badge bg-danger">Failed</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if status.error %}
+                                        <span class="text-danger">{{ status.error }}</span>
+                                    {% else %}
+                                        <span class="text-muted">None</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <!-- Template Information -->
+    <div class="col-md-6 mb-4">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Template Information</h5>
+            </div>
+            <div class="card-body">
+                {% if diagnostics.template_info.error %}
+                    <div class="alert alert-warning">{{ diagnostics.template_info.error }}</div>
+                {% else %}
+                    <table class="table table-sm">
+                        <tr>
+                            <th>Path:</th>
+                            <td>{{ diagnostics.template_info.path }}</td>
+                        </tr>
+                        <tr>
+                            <th>Directory Exists:</th>
+                            <td>{{ diagnostics.template_info.exists }}</td>
+                        </tr>
+                        {% if diagnostics.template_info.base_exists %}
+                        <tr>
+                            <th>base.html:</th>
+                            <td>Exists ({{ diagnostics.template_info.base_size }} bytes)</td>
+                        </tr>
+                        {% endif %}
+                        {% if diagnostics.template_info.index_exists %}
+                        <tr>
+                            <th>index.html:</th>
+                            <td>Exists ({{ diagnostics.template_info.index_size }} bytes)</td>
+                        </tr>
+                        {% endif %}
+                    </table>
+                    
+                    {% if diagnostics.template_info.files %}
+                    <h6 class="mt-3">Available Templates:</h6>
+                    <ul class="list-group">
+                        {% for template in diagnostics.template_info.files %}
+                        <li class="list-group-item">{{ template }}</li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <!-- Database Information -->
+    <div class="col-md-6 mb-4">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Database Information</h5>
+            </div>
+            <div class="card-body">
+                {% if diagnostics.database_info.error %}
+                    <div class="alert alert-danger">{{ diagnostics.database_info.error }}</div>
+                {% else %}
+                    <table class="table table-sm">
+                        <tr>
+                            <th>Path:</th>
+                            <td>{{ diagnostics.database_info.path }}</td>
+                        </tr>
+                        <tr>
+                            <th>Database Exists:</th>
+                            <td>{% if diagnostics.database_info.exists %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
+                        </tr>
+                        {% if diagnostics.database_info.exists %}
+                            <tr>
+                                <th>Users Table:</th>
+                                <td>{% if diagnostics.database_info.users_table_exists %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
+                            </tr>
+                            {% if diagnostics.database_info.users_table_exists %}
+                                <tr>
+                                    <th>User Count:</th>
+                                    <td>{{ diagnostics.database_info.user_count }}</td>
+                                </tr>
+                                <tr>
+                                    <th>Admin User:</th>
+                                    <td>{% if diagnostics.database_info.admin_user_exists %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
+                                </tr>
+                            {% endif %}
+                        {% endif %}
+                    </table>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Recreate templates button
+        const recreateBtn = document.getElementById('recreate-templates-btn');
+        if (recreateBtn) {
+            recreateBtn.addEventListener('click', function() {
+                if (confirm('Are you sure you want to recreate all templates? This may overwrite existing templates.')) {
+                    fetch('/recreate-templates', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'}
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message);
+                        location.reload();
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        alert('An error occurred while recreating templates.');
+                    });
                 }
             });
-        });
-    }
-    
-    // Auto-hide alerts after 5 seconds
-    const alerts = document.querySelectorAll('.alert:not(.alert-permanent)');
-    if (alerts) {
-        alerts.forEach(alert => {
-            setTimeout(function() {
-                alert.classList.add('fade');
-                setTimeout(function() { alert.remove(); }, 500);
-            }, 5000);
-        });
-    }
-    
-    // Health check
-    setInterval(function() {
-        fetch('/health')
-            .then(response => response.json())
-            .then(data => {
-                if (data.status !== 'healthy') {
-                    console.warn('Health check reports unhealthy status:', data);
+        }
+        
+        // Initialize database button
+        const initDbBtn = document.getElementById('init-database-btn');
+        if (initDbBtn) {
+            initDbBtn.addEventListener('click', function() {
+                if (confirm('Are you sure you want to initialize the database? This may overwrite existing data.')) {
+                    fetch('/init-database', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'}
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message);
+                        location.reload();
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        alert('An error occurred while initializing the database.');
+                    });
                 }
-            })
-            .catch(error => console.error('Health check error:', error));
-    }, 30000);
-});
-"""
+            });
+        }
+    });
+</script>
+{% endblock %}"""
     }
     
     try:
@@ -950,20 +1256,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 with open(template_path, 'w') as f:
                     f.write(template_content)
                 logger.info(f"Created/recreated template: {template_name}")
-        
-        # Create static files directories
-        os.makedirs('static/css', exist_ok=True)
-        os.makedirs('static/js', exist_ok=True)
-        
-        # Generate static files if they don't exist
-        for filepath, content in static_files.items():
-            full_path = f'static/{filepath}'
-            if not os.path.exists(full_path):
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                with open(full_path, 'w') as f:
-                    f.write(content)
-                logger.info(f"Created static file: {filepath}")
                 
-        logger.info("All templates and static files generated successfully")
+        logger.info("All templates generated successfully")
     except Exception as e:
         logger.error(f"Error generating templates: {e}")
