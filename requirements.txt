@@ -1,6 +1,6 @@
 # Core framework - essential
 Flask==2.3.3
-Werkzeug==2.3.7
+Werkzeug==3.0.6
 Jinja2==3.1.2
 gunicorn==21.2.0
 Flask-Login==0.6.2
