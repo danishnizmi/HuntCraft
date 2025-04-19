@@ -39,10 +39,10 @@ steps:
           echo "Bucket already exists: gs://detonation-results-$PROJECT_ID"
         fi
         
-        # Create service account if needed - Fix: use correct service account name
+        # Define service account with consistent name and format
         SERVICE_ACCOUNT="malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
         
-        # Fix: Check for the correct service account
+        # Check for the service account using consistent naming
         if ! gcloud iam service-accounts describe $SERVICE_ACCOUNT &>/dev/null; then
           echo "Creating service account: $SERVICE_ACCOUNT"
           gcloud iam service-accounts create malware-platform-sa --display-name="Malware Detonation Platform Service Account"
@@ -50,8 +50,7 @@ steps:
           echo "Service account already exists: $SERVICE_ACCOUNT"
         fi
         
-        # Grant necessary permissions (idempotent operations)
-        # Fix: Add condition=None flag to address the error
+        # Grant necessary permissions with correct service account format
         echo "Granting IAM permissions to service account: $SERVICE_ACCOUNT"
         
         # Storage Admin role for bucket access
@@ -94,29 +93,29 @@ steps:
           echo "PubSub subscription already exists: detonation-app-sub"
         fi
         
-        # Create VM instance templates if needed
-        # Windows template - use correct service account
+        # Create VM instance templates with correct service account format
+        # Windows VM template
         if ! gcloud compute instance-templates describe detonation-win10-template &>/dev/null; then
           echo "Creating Windows VM template"
           gcloud compute instance-templates create detonation-win10-template \
             --machine-type=e2-medium \
             --image-family=windows-2019 \
             --image-project=windows-cloud \
-            --service-account=$SERVICE_ACCOUNT \
+            --service-account="$SERVICE_ACCOUNT" \
             --scopes=cloud-platform \
             --tags=detonation-vm,windows-vm
         else
           echo "Windows VM template already exists"
         fi
         
-        # Linux template - use correct service account
+        # Linux VM template
         if ! gcloud compute instance-templates describe detonation-ubuntu-template &>/dev/null; then
           echo "Creating Linux VM template"
           gcloud compute instance-templates create detonation-ubuntu-template \
             --machine-type=e2-medium \
             --image-family=ubuntu-2004-lts \
             --image-project=ubuntu-os-cloud \
-            --service-account=$SERVICE_ACCOUNT \
+            --service-account="$SERVICE_ACCOUNT" \
             --scopes=cloud-platform \
             --tags=detonation-vm,linux-vm
         else
