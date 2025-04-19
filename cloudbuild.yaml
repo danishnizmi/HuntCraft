@@ -39,43 +39,40 @@ steps:
           echo "Bucket already exists: gs://detonation-results-$PROJECT_ID"
         fi
         
-        # Define service account with consistent name and format
-        SERVICE_ACCOUNT="malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
+        # Set up the service account - FIX: use consistent naming
+        SA_NAME="malware-platform-sa"
+        SA_EMAIL="$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
         
-        # Check for the service account using consistent naming
-        if ! gcloud iam service-accounts describe $SERVICE_ACCOUNT &>/dev/null; then
-          echo "Creating service account: $SERVICE_ACCOUNT"
-          gcloud iam service-accounts create malware-platform-sa --display-name="Malware Detonation Platform Service Account"
+        # Check if service account exists, create it if it doesn't
+        if ! gcloud iam service-accounts describe $SA_EMAIL &>/dev/null; then
+          echo "Creating service account: $SA_EMAIL"
+          gcloud iam service-accounts create $SA_NAME --display-name="Malware Detonation Platform Service Account"
         else
-          echo "Service account already exists: $SERVICE_ACCOUNT"
+          echo "Service account already exists: $SA_EMAIL"
         fi
         
-        # Grant necessary permissions with correct service account format
-        echo "Granting IAM permissions to service account: $SERVICE_ACCOUNT"
+        # Grant necessary permissions - FIX: use correct service account format
+        echo "Granting IAM permissions to service account: $SA_EMAIL"
         
         # Storage Admin role for bucket access
         gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$SERVICE_ACCOUNT" \
-          --role="roles/storage.admin" \
-          --condition=None
+          --member="serviceAccount:$SA_EMAIL" \
+          --role="roles/storage.admin"
           
         # PubSub Publisher role
         gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$SERVICE_ACCOUNT" \
-          --role="roles/pubsub.publisher" \
-          --condition=None
+          --member="serviceAccount:$SA_EMAIL" \
+          --role="roles/pubsub.publisher"
           
         # PubSub Subscriber role
         gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$SERVICE_ACCOUNT" \
-          --role="roles/pubsub.subscriber" \
-          --condition=None
+          --member="serviceAccount:$SA_EMAIL" \
+          --role="roles/pubsub.subscriber"
 
         # Compute Admin role (for VM management)
         gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$SERVICE_ACCOUNT" \
-          --role="roles/compute.admin" \
-          --condition=None
+          --member="serviceAccount:$SA_EMAIL" \
+          --role="roles/compute.admin"
           
         # Create PubSub topic for detonation notifications if it doesn't exist
         if ! gcloud pubsub topics describe detonation-notifications &>/dev/null; then
@@ -93,29 +90,28 @@ steps:
           echo "PubSub subscription already exists: detonation-app-sub"
         fi
         
-        # Create VM instance templates with correct service account format
-        # Windows VM template
+        # Create VM instance templates - FIX: correct service account format
         if ! gcloud compute instance-templates describe detonation-win10-template &>/dev/null; then
           echo "Creating Windows VM template"
           gcloud compute instance-templates create detonation-win10-template \
             --machine-type=e2-medium \
             --image-family=windows-2019 \
             --image-project=windows-cloud \
-            --service-account="$SERVICE_ACCOUNT" \
+            --service-account=$SA_EMAIL \
             --scopes=cloud-platform \
             --tags=detonation-vm,windows-vm
         else
           echo "Windows VM template already exists"
         fi
         
-        # Linux VM template
+        # Linux template
         if ! gcloud compute instance-templates describe detonation-ubuntu-template &>/dev/null; then
           echo "Creating Linux VM template"
           gcloud compute instance-templates create detonation-ubuntu-template \
             --machine-type=e2-medium \
             --image-family=ubuntu-2004-lts \
             --image-project=ubuntu-os-cloud \
-            --service-account="$SERVICE_ACCOUNT" \
+            --service-account=$SA_EMAIL \
             --scopes=cloud-platform \
             --tags=detonation-vm,linux-vm
         else
