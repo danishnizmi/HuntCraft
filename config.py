@@ -19,15 +19,23 @@ class Config:
     GCP_REGION = os.environ.get('GCP_REGION', 'us-central1')
     GCP_ZONE = os.environ.get('GCP_ZONE', 'us-central1-a')
     
-    # Storage configuration - Fixed to prevent GCP_STORAGE_BUCKET error
+    # Storage configuration - Enhanced with better error handling
     if ON_CLOUD_RUN:
         DATABASE_PATH = '/app/data/malware_platform.db'
         UPLOAD_FOLDER = '/app/data/uploads'
+        
+        # Ensure upload folder exists
+        try:
+            os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+            logger.info(f"Ensured upload folder exists: {UPLOAD_FOLDER}")
+        except Exception as e:
+            logger.error(f"Error creating upload folder: {str(e)}")
         
         # Use environment variable if provided, otherwise construct from PROJECT_ID
         GCP_STORAGE_BUCKET = os.environ.get('GCP_STORAGE_BUCKET')
         if not GCP_STORAGE_BUCKET and PROJECT_ID:
             GCP_STORAGE_BUCKET = f"malware-samples-{PROJECT_ID}"
+            logger.info(f"Using derived bucket name: {GCP_STORAGE_BUCKET}")
         elif not GCP_STORAGE_BUCKET:
             GCP_STORAGE_BUCKET = "malware-samples-default"
             logger.warning("No GCP_STORAGE_BUCKET or PROJECT_ID provided, using default bucket name")
@@ -36,11 +44,13 @@ class Config:
         GCP_RESULTS_BUCKET = os.environ.get('GCP_RESULTS_BUCKET')
         if not GCP_RESULTS_BUCKET and PROJECT_ID:
             GCP_RESULTS_BUCKET = f"detonation-results-{PROJECT_ID}"
+            logger.info(f"Using derived results bucket name: {GCP_RESULTS_BUCKET}")
         elif not GCP_RESULTS_BUCKET:
             GCP_RESULTS_BUCKET = "detonation-results-default"
             logger.warning("No GCP_RESULTS_BUCKET or PROJECT_ID provided, using default bucket name")
         
-        # Store bucket access test results
+        # Verify bucket access if GCP is enabled
+        GCP_BUCKET_ACCESSIBLE = False
         try:
             from google.cloud import storage
             client = storage.Client()
@@ -49,8 +59,18 @@ class Config:
             try:
                 client.get_bucket(GCP_STORAGE_BUCKET)
                 logger.info(f"Successfully connected to bucket: {GCP_STORAGE_BUCKET}")
+                GCP_BUCKET_ACCESSIBLE = True
             except Exception as e:
                 logger.warning(f"Could not access storage bucket {GCP_STORAGE_BUCKET}: {str(e)}")
+                logger.warning("File uploads will use local storage as fallback")
+                buckets_exist = False
+                
+            # Check results bucket too
+            try:
+                client.get_bucket(GCP_RESULTS_BUCKET)
+                logger.info(f"Successfully connected to results bucket: {GCP_RESULTS_BUCKET}")
+            except Exception as e:
+                logger.warning(f"Could not access results bucket {GCP_RESULTS_BUCKET}: {str(e)}")
                 buckets_exist = False
                 
             # Set flag to indicate if we should use local storage as fallback
@@ -58,14 +78,24 @@ class Config:
         except Exception as e:
             logger.warning(f"Error initializing GCP storage client: {str(e)}")
             USE_LOCAL_STORAGE = True
+            GCP_BUCKET_ACCESSIBLE = False
     else:
         BASE_DIR = Path(__file__).resolve().parent
         DATABASE_PATH = os.path.join(BASE_DIR, 'data', 'malware_platform.db')
         UPLOAD_FOLDER = os.path.join(BASE_DIR, 'data', 'uploads')
+        
+        # Ensure upload folder exists
+        try:
+            os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+            logger.info(f"Ensured upload folder exists: {UPLOAD_FOLDER}")
+        except Exception as e:
+            logger.error(f"Error creating upload folder: {str(e)}")
+            
         GCP_STORAGE_BUCKET = f"malware-samples-dev-{PROJECT_ID}" if PROJECT_ID else "malware-samples-local"
         GCP_RESULTS_BUCKET = f"detonation-results-dev-{PROJECT_ID}" if PROJECT_ID else "detonation-results-local"
         # Default to local storage in dev environment
         USE_LOCAL_STORAGE = True
+        GCP_BUCKET_ACCESSIBLE = False
     
     # VM configuration
     VM_NETWORK = os.environ.get('VM_NETWORK', 'detonation-network')
@@ -150,7 +180,8 @@ class Config:
             "results_bucket": cls.GCP_RESULTS_BUCKET,
             "upload_folder": cls.UPLOAD_FOLDER,
             "on_cloud_run": cls.ON_CLOUD_RUN,
-            "project_id": cls.PROJECT_ID
+            "project_id": cls.PROJECT_ID,
+            "gcp_bucket_accessible": getattr(cls, 'GCP_BUCKET_ACCESSIBLE', False)
         }
 
 # Set SECRET_KEY safely
