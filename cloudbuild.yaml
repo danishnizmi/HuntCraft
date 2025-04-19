@@ -9,11 +9,11 @@ steps:
       - |
         echo "Setting up Cloud Build permissions..."
         
-        # Use the PROJECT_ID directly - don't create CLOUDBUILD_SA variable that triggers error
-        PROJECT_ID=$PROJECT_ID
+        # Use PROJECT_ID directly from environment
+        echo "Using project: $PROJECT_ID"
         PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
         
-        # Grant Artifact Registry permissions - use actual email directly to avoid substitution issues
+        # Grant Artifact Registry permissions
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:$PROJECT_NUMBER@cloudbuild.gserviceaccount.com" \
           --role="roles/artifactregistry.writer" > /dev/null 2>&1 || echo "Failed to grant Artifact Registry permissions"
@@ -37,7 +37,7 @@ steps:
         # Create required storage buckets with improved error handling and validation
         echo "Creating storage buckets..."
         
-        # Define local bash variables (not Cloud Build substitutions)
+        # Define fully local bash variables - not referenced as Cloud Build substitutions
         SAMPLES_BUCKET="malware-samples-$PROJECT_ID"
         RESULTS_BUCKET="detonation-results-$PROJECT_ID"
         
@@ -216,7 +216,7 @@ steps:
           --platform=managed \
           --region=${_REGION}
         
-        # Allow public access if needed - fixed command without --condition flag
+        # Allow public access
         echo "Configuring public access..."
         gcloud run services add-iam-policy-binding malware-detonation-platform \
           --member="allUsers" \
@@ -251,7 +251,7 @@ steps:
         echo "Service URL Info:"
         gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null || echo "Service URL not available"
         
-        # Print confirmation that buckets exist (using local bash variables)
+        # Create and display bucket names directly
         echo "Storage Buckets:"
         echo "- Malware samples: gs://malware-samples-$PROJECT_ID"
         echo "- Detonation results: gs://detonation-results-$PROJECT_ID"
