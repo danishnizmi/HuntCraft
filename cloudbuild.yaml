@@ -39,39 +39,35 @@ steps:
           echo "Bucket already exists: gs://detonation-results-$PROJECT_ID"
         fi
         
-        # Set up the service account - FIX: use consistent naming
-        SA_NAME="malware-platform-sa"
-        SA_EMAIL="$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
-        
-        # Check if service account exists, create it if it doesn't
-        if ! gcloud iam service-accounts describe $SA_EMAIL &>/dev/null; then
-          echo "Creating service account: $SA_EMAIL"
-          gcloud iam service-accounts create $SA_NAME --display-name="Malware Detonation Platform Service Account"
+        # Check if service account exists, use the existing service account
+        if ! gcloud iam service-accounts describe malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com &>/dev/null; then
+          echo "Creating service account: malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
+          gcloud iam service-accounts create malware-platform-sa --display-name="Malware Detonation Platform Service Account"
         else
-          echo "Service account already exists: $SA_EMAIL"
+          echo "Service account already exists: malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
         fi
         
-        # Grant necessary permissions - FIX: use correct service account format
-        echo "Granting IAM permissions to service account: $SA_EMAIL"
+        # Grant necessary permissions
+        echo "Granting IAM permissions to service account: malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
         
         # Storage Admin role for bucket access
         gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$SA_EMAIL" \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
           --role="roles/storage.admin"
           
         # PubSub Publisher role
         gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$SA_EMAIL" \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
           --role="roles/pubsub.publisher"
           
         # PubSub Subscriber role
         gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$SA_EMAIL" \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
           --role="roles/pubsub.subscriber"
 
         # Compute Admin role (for VM management)
         gcloud projects add-iam-policy-binding $PROJECT_ID \
-          --member="serviceAccount:$SA_EMAIL" \
+          --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
           --role="roles/compute.admin"
           
         # Create PubSub topic for detonation notifications if it doesn't exist
@@ -90,14 +86,14 @@ steps:
           echo "PubSub subscription already exists: detonation-app-sub"
         fi
         
-        # Create VM instance templates - FIX: correct service account format
+        # Create VM instance templates
         if ! gcloud compute instance-templates describe detonation-win10-template &>/dev/null; then
           echo "Creating Windows VM template"
           gcloud compute instance-templates create detonation-win10-template \
             --machine-type=e2-medium \
             --image-family=windows-2019 \
             --image-project=windows-cloud \
-            --service-account=$SA_EMAIL \
+            --service-account=malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com \
             --scopes=cloud-platform \
             --tags=detonation-vm,windows-vm
         else
@@ -111,7 +107,7 @@ steps:
             --machine-type=e2-medium \
             --image-family=ubuntu-2004-lts \
             --image-project=ubuntu-os-cloud \
-            --service-account=$SA_EMAIL \
+            --service-account=malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com \
             --scopes=cloud-platform \
             --tags=detonation-vm,linux-vm
         else
