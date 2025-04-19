@@ -6,6 +6,8 @@ import os
 import datetime
 import logging
 import traceback
+import hashlib
+import secrets
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
 from pathlib import Path
@@ -23,6 +25,34 @@ class User(UserMixin):
         self.id = id
         self.username = username
         self.role = role
+
+def generate_admin_password(app):
+    """
+    Generate a deterministic but unique admin password based on app configuration.
+    This ensures the same password is generated each time for the same environment,
+    but different environments get different passwords.
+    """
+    try:
+        # Use a combination of app configuration values as seed
+        secret_key = app.config.get('SECRET_KEY', '')
+        project_id = app.config.get('GCP_PROJECT_ID', '')
+        hostname = os.environ.get('HOSTNAME', '')
+        
+        # Create a seed string - combine multiple values for better uniqueness
+        seed = f"{secret_key}:{project_id}:{hostname}:admin_password_seed"
+        
+        # Generate a deterministic hash
+        password_hash = hashlib.sha256(seed.encode()).hexdigest()
+        
+        # Create a password with good complexity (16 chars with mixed types)
+        # Take first 12 chars from hash and add complexity characters
+        password = password_hash[:12] + 'A1$z'
+        
+        return password
+    except Exception as e:
+        logger.error(f"Error generating admin password: {e}")
+        # Fallback to a random password if something goes wrong
+        return f"Secure{secrets.token_hex(8)}!"
 
 def init_app(app):
     """Initialize web interface module with Flask app"""
@@ -174,6 +204,9 @@ def ensure_db_tables(app):
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
         table_exists = cursor.fetchone() is not None
         
+        # Generate admin password
+        admin_password = generate_admin_password(app)
+        
         if not table_exists:
             logger.info("Users table doesn't exist, creating it")
             # Create users table
@@ -186,12 +219,13 @@ def ensure_db_tables(app):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
             
-            # Create default admin user
+            # Create admin user with generated password
             cursor.execute(
                 "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                ("admin", generate_password_hash("admin123"), "admin")
+                ("admin", generate_password_hash(admin_password), "admin")
             )
-            logger.info("Created default admin user")
+            logger.info(f"Created admin user with username: admin and password: {admin_password}")
+            logger.warning("SECURITY NOTE: Admin password can be found in the logs. Please change it after first login.")
         else:
             # Check if admin user exists
             cursor.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
@@ -201,8 +235,10 @@ def ensure_db_tables(app):
                 logger.info("Admin user doesn't exist, creating it")
                 cursor.execute(
                     "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                    ("admin", generate_password_hash("admin123"), "admin")
+                    ("admin", generate_password_hash(admin_password), "admin")
                 )
+                logger.info(f"Created admin user with username: admin and password: {admin_password}")
+                logger.warning("SECURITY NOTE: Admin password can be found in the logs. Please change it after first login.")
         
         conn.commit()
         conn.close()
@@ -227,11 +263,15 @@ def create_database_schema(cursor):
         # Create default admin user if no users exist
         cursor.execute("SELECT COUNT(*) FROM users")
         if cursor.fetchone()[0] == 0:
+            # Generate admin password - need to get app context
+            admin_password = generate_admin_password(current_app)
+            
             cursor.execute(
                 "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                ("admin", generate_password_hash("admin123"), "admin")
+                ("admin", generate_password_hash(admin_password), "admin")
             )
-            logger.info("Created default admin user")
+            logger.info(f"Created admin user with username: admin and password: {admin_password}")
+            logger.warning("SECURITY NOTE: Admin password can be found in the logs. Please change it after first login.")
         
         logger.info("Web interface database schema created successfully")
     except Exception as e:
@@ -406,7 +446,7 @@ def login():
                     </div>
                     <button type="submit">Login</button>
                 </form>
-                <p><small>Default credentials: admin / admin123</small></p>
+                <p><small>Default username: admin</small></p>
             </div>
         </body>
         </html>
@@ -987,7 +1027,7 @@ def generate_base_templates():
                 </form>
                 
                 <div class="mt-4">
-                    <small class="text-muted">Default credentials: admin / admin123</small>
+                    <small class="text-muted">Default username: admin (password available in system logs)</small>
                 </div>
             </div>
         </div>
