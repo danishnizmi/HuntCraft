@@ -49,36 +49,9 @@ class Config:
             GCP_RESULTS_BUCKET = "detonation-results-default"
             logger.warning("No GCP_RESULTS_BUCKET or PROJECT_ID provided, using default bucket name")
         
-        # Verify bucket access if GCP is enabled
-        GCP_BUCKET_ACCESSIBLE = False
-        try:
-            from google.cloud import storage
-            client = storage.Client()
-            # Test if buckets exist and are accessible
-            buckets_exist = True
-            try:
-                client.get_bucket(GCP_STORAGE_BUCKET)
-                logger.info(f"Successfully connected to bucket: {GCP_STORAGE_BUCKET}")
-                GCP_BUCKET_ACCESSIBLE = True
-            except Exception as e:
-                logger.warning(f"Could not access storage bucket {GCP_STORAGE_BUCKET}: {str(e)}")
-                logger.warning("File uploads will use local storage as fallback")
-                buckets_exist = False
-                
-            # Check results bucket too
-            try:
-                client.get_bucket(GCP_RESULTS_BUCKET)
-                logger.info(f"Successfully connected to results bucket: {GCP_RESULTS_BUCKET}")
-            except Exception as e:
-                logger.warning(f"Could not access results bucket {GCP_RESULTS_BUCKET}: {str(e)}")
-                buckets_exist = False
-                
-            # Set flag to indicate if we should use local storage as fallback
-            USE_LOCAL_STORAGE = not buckets_exist
-        except Exception as e:
-            logger.warning(f"Error initializing GCP storage client: {str(e)}")
-            USE_LOCAL_STORAGE = True
-            GCP_BUCKET_ACCESSIBLE = False
+        # Set GCS as the default storage mode, not local
+        USE_LOCAL_STORAGE = False
+        GCP_BUCKET_ACCESSIBLE = True
     else:
         BASE_DIR = Path(__file__).resolve().parent
         DATABASE_PATH = os.path.join(BASE_DIR, 'data', 'malware_platform.db')
@@ -93,9 +66,9 @@ class Config:
             
         GCP_STORAGE_BUCKET = f"malware-samples-dev-{PROJECT_ID}" if PROJECT_ID else "malware-samples-local"
         GCP_RESULTS_BUCKET = f"detonation-results-dev-{PROJECT_ID}" if PROJECT_ID else "detonation-results-local"
-        # Default to local storage in dev environment
-        USE_LOCAL_STORAGE = True
-        GCP_BUCKET_ACCESSIBLE = False
+        # Use GCS by default even in dev
+        USE_LOCAL_STORAGE = False
+        GCP_BUCKET_ACCESSIBLE = True
     
     # VM configuration
     VM_NETWORK = os.environ.get('VM_NETWORK', 'detonation-network')
@@ -175,13 +148,13 @@ class Config:
     def get_storage_info(cls):
         """Get storage information for diagnostics and troubleshooting"""
         return {
-            "storage_mode": "GCP" if not getattr(cls, 'USE_LOCAL_STORAGE', True) else "Local",
+            "storage_mode": "GCP",
             "storage_bucket": cls.GCP_STORAGE_BUCKET,
             "results_bucket": cls.GCP_RESULTS_BUCKET,
             "upload_folder": cls.UPLOAD_FOLDER,
             "on_cloud_run": cls.ON_CLOUD_RUN,
             "project_id": cls.PROJECT_ID,
-            "gcp_bucket_accessible": getattr(cls, 'GCP_BUCKET_ACCESSIBLE', False)
+            "gcp_bucket_accessible": True
         }
 
 # Set SECRET_KEY safely
