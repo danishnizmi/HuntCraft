@@ -1,8 +1,8 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, g, jsonify, session, abort
+from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, jsonify, session
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+import os
 import sqlite3
 import json
-import os
 import datetime
 import logging
 import traceback
@@ -13,7 +13,6 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from pathlib import Path
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Create blueprint - Root path is handled by this blueprint
@@ -27,47 +26,24 @@ class User(UserMixin):
         self.role = role
 
 def generate_admin_password(app):
-    """
-    Generate a deterministic but unique admin password based on app configuration.
-    This ensures the same password is generated each time for the same environment,
-    but different environments get different passwords.
-    """
+    """Generate a deterministic admin password based on app configuration."""
     try:
-        # Use a combination of app configuration values as seed
-        secret_key = app.config.get('SECRET_KEY', '')
-        project_id = app.config.get('GCP_PROJECT_ID', '')
-        hostname = os.environ.get('HOSTNAME', '')
-        
-        # Create a seed string - combine multiple values for better uniqueness
-        seed = f"{secret_key}:{project_id}:{hostname}:admin_password_seed"
-        
-        # Generate a deterministic hash
+        # Create a seed string using app configuration
+        seed = f"{app.config.get('SECRET_KEY', '')}:{app.config.get('GCP_PROJECT_ID', '')}:{os.environ.get('HOSTNAME', '')}:admin_password_seed"
         password_hash = hashlib.sha256(seed.encode()).hexdigest()
-        
-        # Create a password with good complexity (16 chars with mixed types)
-        # Take first 12 chars from hash and add complexity characters
-        password = password_hash[:12] + 'A1$z'
-        
-        return password
+        # Create a complex password: first 12 chars of hash + complexity chars
+        return password_hash[:12] + 'A1$z'
     except Exception as e:
         logger.error(f"Error generating admin password: {e}")
-        # Fallback to a random password if something goes wrong
         return f"Secure{secrets.token_hex(8)}!"
 
 def init_app(app):
     """Initialize web interface module with Flask app"""
-    logger.info("Initializing web interface module")
-    
-    # Register blueprint first to avoid initialization issues
     try:
+        # Register blueprint first
         app.register_blueprint(web_bp)
         logger.info("Web interface blueprint registered successfully")
-    except Exception as e:
-        logger.error(f"Failed to register web interface blueprint: {e}")
-        raise
-    
-    # Continue with other initialization in a safer way
-    try:
+        
         # Set up exception handling
         app.errorhandler(500)(handle_server_error)
         app.errorhandler(Exception)(handle_exception)
@@ -78,26 +54,20 @@ def init_app(app):
         login_manager.login_message = "Please log in to access this page."
         login_manager.login_message_category = "info"
         
-        # Set up context processor for common template variables
+        # Set up context processor for template variables
         app.context_processor(inject_template_variables)
         
-        # Generate necessary templates and static files
+        # Generate application essentials
         with app.app_context():
-            # Ensure necessary directories exist
+            # These operations must be in the correct order
             ensure_directories(app)
-            
-            # Ensure the database has been initialized with the user table
             ensure_db_tables(app)
+            generate_base_templates(app)
+            generate_static_files(app)
             
-            # Generate templates
-            generate_base_templates()
-            
-            # Generate basic CSS and JS
-            generate_static_files()
-            
-            logger.info("Web interface module initialized successfully")
+        logger.info("Web interface module initialized successfully")
     except Exception as e:
-        logger.error(f"Error in web interface module initialization: {e}\n{traceback.format_exc()}")
+        logger.error(f"Error in web interface initialization: {e}\n{traceback.format_exc()}")
         # Don't re-raise to allow app to start with limited functionality
 
 def ensure_directories(app):
@@ -114,7 +84,7 @@ def ensure_directories(app):
     for directory in dirs_to_create:
         try:
             os.makedirs(directory, exist_ok=True)
-            logger.info(f"Ensured directory exists: {directory}")
+            logger.debug(f"Ensured directory exists: {directory}")
         except Exception as e:
             logger.error(f"Error creating directory {directory}: {e}")
 
@@ -122,31 +92,23 @@ def handle_server_error(e):
     """Handle 500 errors gracefully"""
     error_traceback = traceback.format_exc()
     logger.error(f"Server error: {str(e)}\n{error_traceback}")
-    if current_app.config.get('DEBUG', False):
-        # Show detailed error information in debug mode
-        return render_template('error.html', 
-                              error_code=500,
-                              error_message=f"Server error: {str(e)}",
-                              error_details=error_traceback), 500
-    else:
-        return render_template('error.html', 
-                              error_code=500,
-                              error_message="The server encountered an internal error. Please try again later."), 500
+    debug_mode = current_app.config.get('DEBUG', False)
+    
+    return render_template('error.html', 
+                          error_code=500,
+                          error_message=f"Server error: {str(e)}" if debug_mode else "The server encountered an internal error.",
+                          error_details=error_traceback if debug_mode else None), 500
 
 def handle_exception(e):
     """Handle uncaught exceptions"""
     error_traceback = traceback.format_exc()
     logger.error(f"Uncaught exception: {str(e)}\n{error_traceback}")
-    if current_app.config.get('DEBUG', False):
-        # Show detailed error information in debug mode
-        return render_template('error.html', 
-                              error_code=500,
-                              error_message=f"Uncaught exception: {str(e)}",
-                              error_details=error_traceback), 500
-    else:
-        return render_template('error.html', 
-                              error_code=500,
-                              error_message="The server encountered an internal error. Please try again later."), 500
+    debug_mode = current_app.config.get('DEBUG', False)
+    
+    return render_template('error.html', 
+                          error_code=500,
+                          error_message=f"Uncaught exception: {str(e)}" if debug_mode else "The server encountered an internal error.",
+                          error_details=error_traceback if debug_mode else None), 500
 
 def inject_template_variables():
     """Inject common variables into all templates"""
@@ -181,26 +143,30 @@ def load_user(user_id):
         logger.error(f"Error loading user: {e}")
     return None
 
+def _db_connection(row_factory=None):
+    """Create a database connection with optional row factory"""
+    try:
+        db_path = current_app.config.get('DATABASE_PATH')
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        
+        conn = sqlite3.connect(db_path)
+        if row_factory:
+            conn.row_factory = row_factory
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise
+
 def ensure_db_tables(app):
     """Ensure database tables exist and admin user is created"""
-    logger.info("Checking and initializing database tables")
     try:
-        # Check if the database file exists
+        # Get database path
         db_path = app.config.get('DATABASE_PATH')
-        db_dir = os.path.dirname(db_path)
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         
-        if not os.path.exists(db_dir):
-            logger.info(f"Database directory doesn't exist at {db_dir}, creating it")
-            os.makedirs(db_dir, exist_ok=True)
-        
-        if not os.path.exists(db_path):
-            logger.info(f"Database file doesn't exist at {db_path}, creating it")
-        
-        # Connect to database
+        # Connect and check for users table
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        
-        # Check if users table exists
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
         table_exists = cursor.fetchone() is not None
         
@@ -209,7 +175,6 @@ def ensure_db_tables(app):
         
         if not table_exists:
             logger.info("Users table doesn't exist, creating it")
-            # Create users table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,33 +184,26 @@ def ensure_db_tables(app):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
             
-            # Create admin user with generated password
+            # Create admin user
             cursor.execute(
                 "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
                 ("admin", generate_password_hash(admin_password), "admin")
             )
-            logger.info(f"Created admin user with username: admin and password: {admin_password}")
-            logger.warning("SECURITY NOTE: Admin password can be found in the logs. Please change it after first login.")
+            logger.info(f"Created admin user with password: {admin_password}")
         else:
             # Check if admin user exists
             cursor.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
-            admin_exists = cursor.fetchone()[0] > 0
-            
-            if not admin_exists:
-                logger.info("Admin user doesn't exist, creating it")
+            if cursor.fetchone()[0] == 0:
                 cursor.execute(
                     "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
                     ("admin", generate_password_hash(admin_password), "admin")
                 )
-                logger.info(f"Created admin user with username: admin and password: {admin_password}")
-                logger.warning("SECURITY NOTE: Admin password can be found in the logs. Please change it after first login.")
+                logger.info(f"Created admin user with password: {admin_password}")
         
         conn.commit()
         conn.close()
-        logger.info("Database tables initialization complete")
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
-        # Log detailed traceback but don't crash the app
         logger.error(traceback.format_exc())
 
 def create_database_schema(cursor):
@@ -263,34 +221,17 @@ def create_database_schema(cursor):
         # Create default admin user if no users exist
         cursor.execute("SELECT COUNT(*) FROM users")
         if cursor.fetchone()[0] == 0:
-            # Generate admin password - need to get app context
             admin_password = generate_admin_password(current_app)
             
             cursor.execute(
                 "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
                 ("admin", generate_password_hash(admin_password), "admin")
             )
-            logger.info(f"Created admin user with username: admin and password: {admin_password}")
-            logger.warning("SECURITY NOTE: Admin password can be found in the logs. Please change it after first login.")
+            logger.info(f"Created admin user with password: {admin_password}")
         
         logger.info("Web interface database schema created successfully")
     except Exception as e:
         logger.error(f"Error creating web interface database schema: {e}")
-        raise
-
-def _db_connection(row_factory=None):
-    """Create a database connection with optional row factory"""
-    try:
-        db_path = current_app.config.get('DATABASE_PATH')
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        
-        conn = sqlite3.connect(db_path)
-        if row_factory:
-            conn.row_factory = row_factory
-        return conn
-    except Exception as e:
-        logger.error(f"Database connection error: {e}")
         raise
 
 def admin_required(f):
@@ -303,17 +244,14 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Root route handler - Main entry point for the application
+# Routes
 @web_bp.route('/')
 def index():
     """Home page"""
-    logger.info("Web blueprint index route handler called")
     try:
-        # Render the template
         return render_template('index.html')
     except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error rendering index page: {str(e)}\nTraceback: {error_details}")
+        logger.error(f"Error rendering index page: {str(e)}\n{traceback.format_exc()}")
         
         # Fallback to a minimal response if template rendering fails
         return f"""
@@ -322,23 +260,15 @@ def index():
         <head>
             <title>Malware Detonation Platform</title>
             <style>
-                body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+                body {{ font-family: Arial, sans-serif; margin: 40px; }}
                 h1 {{ color: #4a6fa5; }}
                 .links {{ margin-top: 20px; }}
-                .links a {{ display: inline-block; margin: 0 10px; padding: 8px 15px; 
-                          color: white; background-color: #4a6fa5; text-decoration: none; 
-                          border-radius: 4px; }}
-                .links a:hover {{ background-color: #395d89; }}
-                .alert {{ background-color: #f8d7da; color: #721c24; padding: 10px; 
-                        border-radius: 4px; margin-bottom: 20px; }}
+                .links a {{ display: inline-block; margin: 10px; padding: 10px; background-color: #4a6fa5; color: white; text-decoration: none; border-radius: 4px; }}
             </style>
         </head>
         <body>
             <h1>Malware Detonation Platform</h1>
             <p>Welcome to the platform.</p>
-            <div class="alert">
-                <strong>Warning:</strong> Template rendering failed. Using fallback interface.
-            </div>
             <div class="links">
                 <a href="/malware">Malware Analysis</a>
                 <a href="/detonation">Detonation Service</a>
@@ -363,15 +293,11 @@ def login():
             password = request.form.get('password')
             remember = 'remember' in request.form
             
-            # Ensure database exists before trying to login
+            # Ensure database exists
             db_path = current_app.config.get('DATABASE_PATH')
-            db_dir = os.path.dirname(db_path)
-            
-            if not os.path.exists(db_dir):
-                os.makedirs(db_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
                 
             if not os.path.exists(db_path):
-                logger.warning(f"Database file not found at {db_path}, initializing it")
                 ensure_db_tables(current_app)
             
             conn = _db_connection()
@@ -380,7 +306,6 @@ def login():
             # Check if users table exists
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
             if cursor.fetchone() is None:
-                logger.warning("Users table doesn't exist, creating it")
                 create_database_schema(cursor)
                 conn.commit()
             
@@ -392,17 +317,10 @@ def login():
                 user = User(user_data[0], user_data[1], user_data[3])
                 login_user(user, remember=remember)
                 
-                # Redirect to the original requested page or dashboard
                 next_page = request.args.get('next')
                 if not next_page or not next_page.startswith('/'):
                     next_page = url_for('web.dashboard')
                 return redirect(next_page)
-            
-            # Debug output when login fails
-            if user_data:
-                logger.warning(f"Login failed for user {username}: Password hash verification failed")
-            else:
-                logger.warning(f"Login failed for user {username}: User not found")
                 
             error = 'Invalid username or password'
         except Exception as e:
@@ -413,6 +331,7 @@ def login():
         return render_template('login.html', error=error)
     except Exception as e:
         logger.error(f"Error rendering login template: {e}")
+        # Fallback to a basic login form
         return f"""
         <!DOCTYPE html>
         <html>
@@ -464,45 +383,31 @@ def logout():
 @login_required
 def dashboard():
     """Dashboard page"""
-    # Get recent data
+    # Get recent data safely
     datasets = []
     analyses = []
     visualizations = []
     
     try:
-        # Safe import of modules using try/except
-        try:
-            from main import get_module
-            malware_module = get_module('malware')
-            if malware_module and hasattr(malware_module, 'get_datasets'):
+        from main import get_module
+        
+        # Try to get malware samples
+        malware_module = get_module('malware')
+        if malware_module:
+            if hasattr(malware_module, 'get_datasets'):
                 datasets = malware_module.get_datasets()
-            elif malware_module and hasattr(malware_module, 'get_recent_samples'):
-                # Alternative function name
+            elif hasattr(malware_module, 'get_recent_samples'):
                 datasets = malware_module.get_recent_samples(5)
-            else:
-                logger.warning("Malware module or dataset functions not available")
-        except Exception as e:
-            logger.error(f"Error loading recent samples: {e}")
         
-        try:
-            from main import get_module
-            detonation_module = get_module('detonation')
-            if detonation_module and hasattr(detonation_module, 'get_detonation_jobs'):
-                analyses = detonation_module.get_detonation_jobs()[:5] if hasattr(detonation_module.get_detonation_jobs(), '__len__') and len(detonation_module.get_detonation_jobs()) > 0 else []
-            else:
-                logger.warning("Detonation module or get_detonation_jobs function not available")
-        except Exception as e:
-            logger.error(f"Error loading detonation jobs: {e}")
+        # Try to get detonation jobs
+        detonation_module = get_module('detonation')
+        if detonation_module and hasattr(detonation_module, 'get_detonation_jobs'):
+            analyses = detonation_module.get_detonation_jobs()[:5] if hasattr(detonation_module.get_detonation_jobs(), '__len__') else []
         
-        try:
-            from main import get_module
-            viz_module = get_module('viz')
-            if viz_module and hasattr(viz_module, 'get_visualizations_for_dashboard'):
-                visualizations = viz_module.get_visualizations_for_dashboard()
-            else:
-                logger.warning("Visualization module or get_visualizations_for_dashboard function not available")
-        except Exception as e:
-            logger.error(f"Error loading visualizations: {e}")
+        # Try to get visualizations
+        viz_module = get_module('viz')
+        if viz_module and hasattr(viz_module, 'get_visualizations_for_dashboard'):
+            visualizations = viz_module.get_visualizations_for_dashboard()
     except Exception as e:
         logger.error(f"Dashboard data loading error: {e}")
     
@@ -547,69 +452,6 @@ def users():
         logger.error(f"Error rendering users template: {e}")
         return redirect(url_for('web.dashboard'))
 
-# Admin route placeholder to satisfy urls used in templates
-@web_bp.route('/infrastructure')
-@login_required
-@admin_required
-def infrastructure():
-    return redirect(url_for('web.diagnostic'))
-
-# Admin route placeholder to satisfy urls used in templates
-@web_bp.route('/add_user')
-@login_required
-@admin_required
-def add_user():
-    flash("User management functionality is not fully implemented yet.", "info")
-    return redirect(url_for('web.users'))
-
-@web_bp.route('/health')
-def health_check():
-    """Health check endpoint"""
-    # Check database health
-    try:
-        conn = _db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users")
-        user_count = cursor.fetchone()[0]
-        conn.close()
-        
-        db_status = {
-            "status": "healthy",
-            "users_table": True,
-            "user_count": user_count
-        }
-    except Exception as e:
-        db_status = {
-            "status": "unhealthy", 
-            "error": str(e)
-        }
-    
-    # Check template directory
-    template_status = {
-        "status": "unknown"
-    }
-    try:
-        template_dir = current_app.template_folder
-        template_status = {
-            "status": "healthy" if os.path.exists(template_dir) else "unhealthy",
-            "path": template_dir,
-            "exists": os.path.exists(template_dir),
-            "files": os.listdir(template_dir) if os.path.exists(template_dir) else []
-        }
-    except Exception as e:
-        template_status = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
-    
-    return jsonify({
-        "status": "healthy" if db_status["status"] == "healthy" and template_status["status"] == "healthy" else "degraded",
-        "source": "web_blueprint", 
-        "database": db_status,
-        "templates": template_status,
-        "timestamp": datetime.datetime.now().isoformat()
-    })
-
 @web_bp.route('/diagnostic')
 def diagnostic():
     """Diagnostic page with system information"""
@@ -636,9 +478,6 @@ def diagnostic():
     # Check template files
     try:
         template_dir = current_app.template_folder
-        if not os.path.isabs(template_dir):
-            template_dir = os.path.join(current_app.root_path, template_dir)
-        
         diagnostics['template_info']['path'] = template_dir
         diagnostics['template_info']['exists'] = os.path.exists(template_dir)
         
@@ -647,15 +486,6 @@ def diagnostic():
             diagnostics['template_info']['files'] = templates
             diagnostics['template_info']['base_exists'] = 'base.html' in templates
             diagnostics['template_info']['index_exists'] = 'index.html' in templates
-            
-            # Check template sizes
-            if diagnostics['template_info']['base_exists']:
-                base_path = os.path.join(template_dir, 'base.html')
-                diagnostics['template_info']['base_size'] = os.path.getsize(base_path)
-            
-            if diagnostics['template_info']['index_exists']:
-                index_path = os.path.join(template_dir, 'index.html')
-                diagnostics['template_info']['index_size'] = os.path.getsize(index_path)
     except Exception as e:
         diagnostics['template_info']['error'] = str(e)
     
@@ -686,29 +516,6 @@ def diagnostic():
     except Exception as e:
         diagnostics['database_info']['error'] = str(e)
     
-    # Get route info
-    try:
-        routes = []
-        for rule in current_app.url_map.iter_rules():
-            routes.append({
-                'endpoint': rule.endpoint,
-                'methods': list(rule.methods),
-                'path': str(rule)
-            })
-        diagnostics['route_info']['routes'] = routes
-        
-        # Count routes by blueprint
-        blueprint_routes = {}
-        for route in routes:
-            bp_name = route['endpoint'].split('.')[0] if '.' in route['endpoint'] else 'app'
-            if bp_name not in blueprint_routes:
-                blueprint_routes[bp_name] = 0
-            blueprint_routes[bp_name] += 1
-        
-        diagnostics['route_info']['blueprint_routes'] = blueprint_routes
-    except Exception as e:
-        diagnostics['route_info']['error'] = str(e)
-    
     try:
         return render_template('diagnostic.html', diagnostics=diagnostics)
     except Exception as e:
@@ -716,12 +523,44 @@ def diagnostic():
         # Return JSON response if template fails
         return jsonify(diagnostics)
 
+@web_bp.route('/health')
+def health_check():
+    """Health check endpoint"""
+    health_data = {"status": "healthy", "source": "web_blueprint"}
+    
+    # Check database health
+    try:
+        conn = _db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        health_data["database"] = {"status": "healthy", "user_count": cursor.fetchone()[0]}
+        conn.close()
+    except Exception as e:
+        health_data["database"] = {"status": "unhealthy", "error": str(e)}
+        health_data["status"] = "degraded"
+    
+    # Check template directory
+    try:
+        template_dir = current_app.template_folder
+        health_data["templates"] = {
+            "status": "healthy" if os.path.exists(template_dir) else "unhealthy",
+            "path": template_dir
+        }
+        if not os.path.exists(template_dir):
+            health_data["status"] = "degraded"
+    except Exception as e:
+        health_data["templates"] = {"status": "unhealthy", "error": str(e)}
+        health_data["status"] = "degraded"
+    
+    health_data["timestamp"] = datetime.datetime.now().isoformat()
+    return jsonify(health_data)
+
 @web_bp.route('/recreate-templates', methods=['POST'])
 def recreate_templates():
     """Recreate basic templates endpoint"""
     try:
-        generate_base_templates()
-        generate_static_files()
+        generate_base_templates(current_app)
+        generate_static_files(current_app)
         return jsonify({"success": True, "message": "Templates recreated successfully"})
     except Exception as e:
         logger.error(f"Error recreating templates: {e}")
@@ -737,68 +576,48 @@ def initialize_database():
         logger.error(f"Error initializing database: {e}")
         return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
 
-# Generate static files for CSS and JS
-def generate_static_files():
+@web_bp.route('/infrastructure')
+@login_required
+@admin_required
+def infrastructure():
+    """Infrastructure management placeholder"""
+    return redirect(url_for('web.diagnostic'))
+
+@web_bp.route('/add_user')
+@login_required
+@admin_required
+def add_user():
+    """User management placeholder"""
+    flash("User management functionality is not fully implemented yet.", "info")
+    return redirect(url_for('web.users'))
+
+def generate_static_files(app):
     """Generate CSS and JS files if they don't exist"""
-    # CSS file
-    css_path = os.path.join(current_app.static_folder, 'css', 'main.css')
-    os.makedirs(os.path.dirname(css_path), exist_ok=True)
-    
-    if not os.path.exists(css_path):
-        try:
+    try:
+        # Create directories
+        css_dir = os.path.join(app.static_folder, 'css')
+        js_dir = os.path.join(app.static_folder, 'js')
+        os.makedirs(css_dir, exist_ok=True)
+        os.makedirs(js_dir, exist_ok=True)
+        
+        # CSS file
+        css_path = os.path.join(css_dir, 'main.css')
+        if not os.path.exists(css_path):
             with open(css_path, 'w') as f:
                 f.write("""/* Main CSS styles */
-body { 
-    font-family: 'Helvetica Neue', Arial, sans-serif; 
-    line-height: 1.6; 
-    color: #333; 
-    background-color: #f8f9fa; 
-}
-.card { 
-    box-shadow: 0 2px 4px rgba(0,0,0,0.05); 
-    margin-bottom: 20px; 
-    border: none; 
-    border-radius: 8px; 
-}
-.card-header { 
-    border-top-left-radius: 8px !important; 
-    border-top-right-radius: 8px !important; 
-}
-.hash-value { 
-    font-family: monospace; 
-    word-break: break-all; 
-}
-.table-responsive { 
-    overflow-x: auto; 
-}
-footer { 
-    margin-top: 50px; 
-    padding: 20px 0; 
-    border-top: 1px solid #e9ecef; 
-}
-
-/* Enhanced error styles */
-pre {
-    background-color: #f8f9fa;
-    padding: 10px;
-    border-radius: 4px;
-    border: 1px solid #dee2e6;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    max-height: 300px;
-    overflow-y: auto;
-}
+body { font-family: 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f8f9fa; }
+.card { box-shadow: 0 2px 4px rgba(0,0,0,0.05); margin-bottom: 20px; border: none; border-radius: 8px; }
+.card-header { border-top-left-radius: 8px !important; border-top-right-radius: 8px !important; }
+.hash-value { font-family: monospace; word-break: break-all; }
+.table-responsive { overflow-x: auto; }
+footer { margin-top: 50px; padding: 20px 0; border-top: 1px solid #e9ecef; }
+pre { background-color: #f8f9fa; padding: 10px; border-radius: 4px; border: 1px solid #dee2e6; white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
 """)
-            logger.info("Created main CSS file")
-        except Exception as e:
-            logger.error(f"Error creating CSS file: {e}")
-    
-    # JS file
-    js_path = os.path.join(current_app.static_folder, 'js', 'main.js')
-    os.makedirs(os.path.dirname(js_path), exist_ok=True)
-    
-    if not os.path.exists(js_path):
-        try:
+                logger.info("Created main CSS file")
+        
+        # JS file
+        js_path = os.path.join(js_dir, 'main.js')
+        if not os.path.exists(js_path):
             with open(js_path, 'w') as f:
                 f.write("""// Main JavaScript
 document.addEventListener('DOMContentLoaded', function() {
@@ -826,31 +645,32 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 """)
-            logger.info("Created main JS file")
-        except Exception as e:
-            logger.error(f"Error creating JS file: {e}")
+                logger.info("Created main JS file")
+    except Exception as e:
+        logger.error(f"Error generating static files: {e}")
 
-# Template generation
-def generate_base_templates():
+def generate_base_templates(app):
     """Generate essential HTML templates for the application"""
-    templates_to_generate = {
-        'base.html': """<!DOCTYPE html>
+    try:
+        # Create templates directory
+        template_dir = app.template_folder
+        if not os.path.isabs(template_dir):
+            template_dir = os.path.join(app.root_path, template_dir)
+            
+        os.makedirs(template_dir, exist_ok=True)
+        
+        # Define templates
+        templates = {
+            'base.html': """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}{{ app_name }}{% endblock %}</title>
-    
-    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    
-    <!-- Font Awesome for icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    
-    <!-- Custom CSS -->
     <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
     {% block head %}{% endblock %}
-    
     <style>
         .navbar { background-color: {{ colors.primary }} !important; }
         .btn-primary { background-color: {{ colors.primary }}; border-color: {{ colors.primary }}; }
@@ -858,7 +678,6 @@ def generate_base_templates():
     </style>
 </head>
 <body>
-    <!-- Navigation -->
     <nav class="navbar navbar-expand-lg navbar-dark">
         <div class="container">
             <a class="navbar-brand" href="/">{{ app_name }}</a>
@@ -899,7 +718,6 @@ def generate_base_templates():
         </div>
     </nav>
 
-    <!-- Main Content -->
     <div class="container mt-4">
         {% with messages = get_flashed_messages(with_categories=true) %}
           {% if messages %}
@@ -912,26 +730,20 @@ def generate_base_templates():
         {% block content %}{% endblock %}
     </div>
 
-    <!-- Footer -->
     <footer class="mt-5 py-3 text-center text-muted">
         <div class="container">
             <p>&copy; {{ year }} {{ app_name }}</p>
         </div>
     </footer>
 
-    <!-- Bootstrap JS Bundle with Popper -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    
-    <!-- Custom JS -->
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>""",
-        
-        'index.html': """{% extends 'base.html' %}
-
+            
+            'index.html': """{% extends 'base.html' %}
 {% block title %}{{ app_name }}{% endblock %}
-
 {% block content %}
 <div class="jumbotron bg-light p-5 rounded">
     <h1 class="display-4">Welcome to {{ app_name }}</h1>
@@ -993,11 +805,9 @@ def generate_base_templates():
     </div>
 </div>
 {% endblock %}""",
-        
-        'login.html': """{% extends 'base.html' %}
-
+            
+            'login.html': """{% extends 'base.html' %}
 {% block title %}Login - {{ app_name }}{% endblock %}
-
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-6">
@@ -1034,11 +844,9 @@ def generate_base_templates():
     </div>
 </div>
 {% endblock %}""",
-        
-        'error.html': """{% extends 'base.html' %}
-
+            
+            'error.html': """{% extends 'base.html' %}
 {% block title %}Error {{ error_code }} - {{ app_name }}{% endblock %}
-
 {% block content %}
 <div class="row justify-content-center mt-5">
     <div class="col-md-8">
@@ -1065,10 +873,156 @@ def generate_base_templates():
 </div>
 {% endblock %}""",
 
-        'profile.html': """{% extends 'base.html' %}
+            'dashboard.html': """{% extends 'base.html' %}
+{% block title %}Dashboard - {{ app_name }}{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>Dashboard</h1>
+    <div class="btn-group">
+        <a href="{{ url_for('malware.upload') }}" class="btn btn-primary">
+            <i class="fas fa-upload"></i> Upload Sample
+        </a>
+        <a href="{{ url_for('viz.create') }}" class="btn btn-outline-primary">
+            <i class="fas fa-chart-line"></i> Create Visualization
+        </a>
+    </div>
+</div>
 
+<!-- System Status -->
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">System Status</h5>
+            </div>
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <span class="badge bg-success rounded-circle" style="width: 12px; height: 12px; display: inline-block;"></span>
+                        Database: Connected
+                    </div>
+                    <div>
+                        <span class="badge bg-success rounded-circle" style="width: 12px; height: 12px; display: inline-block;"></span>
+                        Storage: Available
+                    </div>
+                    <div>
+                        <span class="badge bg-success rounded-circle" style="width: 12px; height: 12px; display: inline-block;"></span>
+                        VM Pool: Ready
+                    </div>
+                    <div>
+                        <span class="badge bg-success rounded-circle" style="width: 12px; height: 12px; display: inline-block;"></span>
+                        Analysis Engine: Running
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Stats Overview -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <h2 class="display-4">{{ datasets|length }}</h2>
+                <p class="text-muted">Malware Samples</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <h2 class="display-4">{{ analyses|length }}</h2>
+                <p class="text-muted">Detonation Jobs</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <h2 class="display-4">{{ visualizations|length }}</h2>
+                <p class="text-muted">Visualizations</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <h2 class="display-4">{{ analyses|selectattr('status', 'equalto', 'running')|list|length }}</h2>
+                <p class="text-muted">Running Jobs</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Activity and Resources -->
+<div class="row">
+    <!-- Recent Samples -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Recent Samples</h5>
+            </div>
+            <div class="card-body">
+                {% if datasets %}
+                    <div class="list-group">
+                        {% for sample in datasets %}
+                            <a href="{{ url_for('malware.view', sample_id=sample.id) }}" class="list-group-item list-group-item-action">
+                                <div class="d-flex w-100 justify-content-between">
+                                    <h6 class="mb-1">{{ sample.name }}</h6>
+                                    <small>{{ sample.created_at|default('Unknown date', true) }}</small>
+                                </div>
+                                <p class="mb-1">Type: {{ sample.file_type }}</p>
+                                <small class="text-muted">SHA256: {{ sample.sha256[:10] }}...</small>
+                            </a>
+                        {% endfor %}
+                    </div>
+                    <div class="text-center mt-3">
+                        <a href="{{ url_for('malware.index') }}" class="btn btn-sm btn-outline-primary">View All Samples</a>
+                    </div>
+                {% else %}
+                    <p class="text-muted">No samples available. <a href="{{ url_for('malware.upload') }}">Upload one now</a>.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <!-- Recent Jobs -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">Recent Detonation Jobs</h5>
+            </div>
+            <div class="card-body">
+                {% if analyses %}
+                    <div class="list-group">
+                        {% for job in analyses %}
+                            <a href="{{ url_for('detonation.view', job_id=job.id) }}" class="list-group-item list-group-item-action">
+                                <div class="d-flex w-100 justify-content-between">
+                                    <h6 class="mb-1">Job #{{ job.id }}</h6>
+                                    <span class="badge {% if job.status == 'completed' %}bg-success{% elif job.status == 'failed' %}bg-danger{% elif job.status == 'running' %}bg-primary{% else %}bg-secondary{% endif %}">
+                                        {{ job.status }}
+                                    </span>
+                                </div>
+                                <p class="mb-1">Sample: {{ job.sample_name or "Unknown" }}</p>
+                                <small class="text-muted">VM: {{ job.vm_type }}</small>
+                            </a>
+                        {% endfor %}
+                    </div>
+                    <div class="text-center mt-3">
+                        <a href="{{ url_for('detonation.index') }}" class="btn btn-sm btn-outline-primary">View All Jobs</a>
+                    </div>
+                {% else %}
+                    <p class="text-muted">No detonation jobs available.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}""",
+
+            'profile.html': """{% extends 'base.html' %}
 {% block title %}User Profile - {{ app_name }}{% endblock %}
-
 {% block content %}
 <div class="row">
     <div class="col-md-8 mx-auto">
@@ -1107,10 +1061,8 @@ def generate_base_templates():
 </div>
 {% endblock %}""",
 
-        'users.html': """{% extends 'base.html' %}
-
+            'users.html': """{% extends 'base.html' %}
 {% block title %}User Management - {{ app_name }}{% endblock %}
-
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h1>User Management</h1>
@@ -1167,10 +1119,8 @@ def generate_base_templates():
 {% endif %}
 {% endblock %}""",
 
-        'diagnostic.html': """{% extends 'base.html' %}
-
+            'diagnostic.html': """{% extends 'base.html' %}
 {% block title %}System Diagnostics - {{ app_name }}{% endblock %}
-
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h1>System Diagnostics</h1>
@@ -1281,13 +1231,13 @@ def generate_base_templates():
                         {% if diagnostics.template_info.base_exists %}
                         <tr>
                             <th>base.html:</th>
-                            <td>Exists ({{ diagnostics.template_info.base_size }} bytes)</td>
+                            <td>Exists</td>
                         </tr>
                         {% endif %}
                         {% if diagnostics.template_info.index_exists %}
                         <tr>
                             <th>index.html:</th>
-                            <td>Exists ({{ diagnostics.template_info.index_size }} bytes)</td>
+                            <td>Exists</td>
                         </tr>
                         {% endif %}
                     </table>
@@ -1397,39 +1347,15 @@ def generate_base_templates():
     });
 </script>
 {% endblock %}"""
-    }
-    
-    try:
-        # Create templates directory
-        template_dir = os.path.join(current_app.root_path, 'templates')
-        os.makedirs(template_dir, exist_ok=True)
+        }
         
-        # Generate templates
-        for template_name, template_content in templates_to_generate.items():
-            template_path = os.path.join(template_dir, template_name)
-            needs_create = False
-            
-            if not os.path.exists(template_path):
-                needs_create = True
-                logger.info(f"Template {template_name} doesn't exist, creating it")
-            else:
-                # Check if template is too small
-                try:
-                    with open(template_path, 'r') as f:
-                        content = f.read()
-                    if len(content) < 100:  # Too small to be a proper template
-                        needs_create = True
-                        logger.info(f"Template {template_name} is too small ({len(content)} bytes), recreating it")
-                except Exception as e:
-                    needs_create = True
-                    logger.error(f"Error reading template {template_name}: {e}, will recreate it")
-            
-            if needs_create:
-                with open(template_path, 'w') as f:
-                    f.write(template_content)
-                logger.info(f"Created/recreated template: {template_name}")
-                
-        logger.info("All templates generated successfully")
+        # Create templates if they don't exist or are too small
+        for name, content in templates.items():
+            path = os.path.join(template_dir, name)
+            if not os.path.exists(path) or os.path.getsize(path) < 100:
+                with open(path, 'w') as f:
+                    f.write(content)
+                logger.info(f"Created/updated template: {name}")
     except Exception as e:
-        logger.error(f"Error generating templates: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error generating templates: {e}\n{traceback.format_exc()}")
+        raise
