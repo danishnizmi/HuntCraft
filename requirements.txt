@@ -35,7 +35,7 @@ pytz==2023.3
 # ssdeep==3.4
 # oletools==0.60.1
 
-# Heavy packages - uncomment if visualizations needed
-# pandas==2.0.3
-# numpy==1.24.4
-# plotly==5.15.0
+# Visualization dependencies - UNCOMMENTED to enable visualization features
+pandas==2.0.3
+numpy==1.24.4
+plotly==5.15.0
