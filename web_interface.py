@@ -1,10 +1,17 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, g, jsonify, session
+from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, g, jsonify, session, abort
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-import sqlite3, json, os, datetime, logging, traceback
+import sqlite3
+import json
+import os
+import datetime
+import logging
+import traceback
 from functools import wraps
 from werkzeug.security import check_password_hash, generate_password_hash
+from pathlib import Path
 
 # Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Create blueprint - Root path is handled by this blueprint
@@ -19,6 +26,8 @@ class User(UserMixin):
 
 def init_app(app):
     """Initialize web interface module with Flask app"""
+    logger.info("Initializing web interface module")
+    
     # Register blueprint first to avoid initialization issues
     try:
         app.register_blueprint(web_bp)
@@ -36,15 +45,16 @@ def init_app(app):
         # Setup login manager
         login_manager.init_app(app)
         login_manager.login_view = 'web.login'
+        login_manager.login_message = "Please log in to access this page."
+        login_manager.login_message_category = "info"
         
         # Set up context processor for common template variables
         app.context_processor(inject_template_variables)
         
         # Generate necessary templates and static files
         with app.app_context():
-            # Ensure database directory exists
-            db_dir = os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db'))
-            os.makedirs(db_dir, exist_ok=True)
+            # Ensure necessary directories exist
+            ensure_directories(app)
             
             # Ensure the database has been initialized with the user table
             ensure_db_tables(app)
@@ -56,10 +66,27 @@ def init_app(app):
             generate_static_files()
             
             logger.info("Web interface module initialized successfully")
-        
     except Exception as e:
-        logger.error(f"Error in web interface module initialization: {e}")
+        logger.error(f"Error in web interface module initialization: {e}\n{traceback.format_exc()}")
         # Don't re-raise to allow app to start with limited functionality
+
+def ensure_directories(app):
+    """Ensure all required directories exist"""
+    dirs_to_create = [
+        app.template_folder,
+        app.static_folder,
+        os.path.join(app.static_folder, 'css'),
+        os.path.join(app.static_folder, 'js'),
+        os.path.dirname(app.config.get('DATABASE_PATH', '/app/data/malware_platform.db')),
+        app.config.get('UPLOAD_FOLDER', '/app/data/uploads')
+    ]
+    
+    for directory in dirs_to_create:
+        try:
+            os.makedirs(directory, exist_ok=True)
+            logger.info(f"Ensured directory exists: {directory}")
+        except Exception as e:
+            logger.error(f"Error creating directory {directory}: {e}")
 
 def handle_server_error(e):
     """Handle 500 errors gracefully"""
@@ -130,11 +157,14 @@ def ensure_db_tables(app):
     try:
         # Check if the database file exists
         db_path = app.config.get('DATABASE_PATH')
+        db_dir = os.path.dirname(db_path)
+        
+        if not os.path.exists(db_dir):
+            logger.info(f"Database directory doesn't exist at {db_dir}, creating it")
+            os.makedirs(db_dir, exist_ok=True)
         
         if not os.path.exists(db_path):
             logger.info(f"Database file doesn't exist at {db_path}, creating it")
-            # Create the directory if it doesn't exist
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
         
         # Connect to database
         conn = sqlite3.connect(db_path)
@@ -179,7 +209,8 @@ def ensure_db_tables(app):
         logger.info("Database tables initialization complete")
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
-        raise
+        # Log detailed traceback but don't crash the app
+        logger.error(traceback.format_exc())
 
 def create_database_schema(cursor):
     """Create database tables"""
@@ -238,24 +269,7 @@ def index():
     """Home page"""
     logger.info("Web blueprint index route handler called")
     try:
-        # Verify templates exist and are valid
-        template_dir = current_app.template_folder
-        if not os.path.isabs(template_dir):
-            template_dir = os.path.join(current_app.root_path, template_dir)
-            
-        # Check if needed templates exist
-        base_exists = os.path.exists(os.path.join(template_dir, 'base.html'))
-        index_exists = os.path.exists(os.path.join(template_dir, 'index.html'))
-        
-        logger.info(f"Template check: base.html exists: {base_exists}, index.html exists: {index_exists}")
-        
-        # Try to create templates if they don't exist
-        if not (base_exists and index_exists):
-            logger.warning("Templates missing, generating them")
-            generate_base_templates()
-        
         # Render the template
-        logger.info("Rendering index.html template")
         return render_template('index.html')
     except Exception as e:
         error_details = traceback.format_exc()
@@ -271,13 +285,20 @@ def index():
                 body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
                 h1 {{ color: #4a6fa5; }}
                 .links {{ margin-top: 20px; }}
-                .links a {{ display: inline-block; margin: 0 10px; color: #4a6fa5; text-decoration: none; }}
-                .links a:hover {{ text-decoration: underline; }}
+                .links a {{ display: inline-block; margin: 0 10px; padding: 8px 15px; 
+                          color: white; background-color: #4a6fa5; text-decoration: none; 
+                          border-radius: 4px; }}
+                .links a:hover {{ background-color: #395d89; }}
+                .alert {{ background-color: #f8d7da; color: #721c24; padding: 10px; 
+                        border-radius: 4px; margin-bottom: 20px; }}
             </style>
         </head>
         <body>
             <h1>Malware Detonation Platform</h1>
             <p>Welcome to the platform.</p>
+            <div class="alert">
+                <strong>Warning:</strong> Template rendering failed. Using fallback interface.
+            </div>
             <div class="links">
                 <a href="/malware">Malware Analysis</a>
                 <a href="/detonation">Detonation Service</a>
@@ -304,6 +325,11 @@ def login():
             
             # Ensure database exists before trying to login
             db_path = current_app.config.get('DATABASE_PATH')
+            db_dir = os.path.dirname(db_path)
+            
+            if not os.path.exists(db_dir):
+                os.makedirs(db_dir, exist_ok=True)
+                
             if not os.path.exists(db_path):
                 logger.warning(f"Database file not found at {db_path}, initializing it")
                 ensure_db_tables(current_app)
@@ -481,6 +507,21 @@ def users():
         logger.error(f"Error rendering users template: {e}")
         return redirect(url_for('web.dashboard'))
 
+# Admin route placeholder to satisfy urls used in templates
+@web_bp.route('/infrastructure')
+@login_required
+@admin_required
+def infrastructure():
+    return redirect(url_for('web.diagnostic'))
+
+# Admin route placeholder to satisfy urls used in templates
+@web_bp.route('/add_user')
+@login_required
+@admin_required
+def add_user():
+    flash("User management functionality is not fully implemented yet.", "info")
+    return redirect(url_for('web.users'))
+
 @web_bp.route('/health')
 def health_check():
     """Health check endpoint"""
@@ -503,10 +544,29 @@ def health_check():
             "error": str(e)
         }
     
+    # Check template directory
+    template_status = {
+        "status": "unknown"
+    }
+    try:
+        template_dir = current_app.template_folder
+        template_status = {
+            "status": "healthy" if os.path.exists(template_dir) else "unhealthy",
+            "path": template_dir,
+            "exists": os.path.exists(template_dir),
+            "files": os.listdir(template_dir) if os.path.exists(template_dir) else []
+        }
+    except Exception as e:
+        template_status = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+    
     return jsonify({
-        "status": "healthy" if db_status["status"] == "healthy" else "degraded",
+        "status": "healthy" if db_status["status"] == "healthy" and template_status["status"] == "healthy" else "degraded",
         "source": "web_blueprint", 
         "database": db_status,
+        "templates": template_status,
         "timestamp": datetime.datetime.now().isoformat()
     })
 
@@ -642,8 +702,9 @@ def generate_static_files():
     """Generate CSS and JS files if they don't exist"""
     # CSS file
     css_path = os.path.join(current_app.static_folder, 'css', 'main.css')
+    os.makedirs(os.path.dirname(css_path), exist_ok=True)
+    
     if not os.path.exists(css_path):
-        os.makedirs(os.path.dirname(css_path), exist_ok=True)
         try:
             with open(css_path, 'w') as f:
                 f.write("""/* Main CSS styles */
@@ -694,8 +755,9 @@ pre {
     
     # JS file
     js_path = os.path.join(current_app.static_folder, 'js', 'main.js')
+    os.makedirs(os.path.dirname(js_path), exist_ok=True)
+    
     if not os.path.exists(js_path):
-        os.makedirs(os.path.dirname(js_path), exist_ok=True)
         try:
             with open(js_path, 'w') as f:
                 f.write("""// Main JavaScript
@@ -825,6 +887,72 @@ def generate_base_templates():
     {% block scripts %}{% endblock %}
 </body>
 </html>""",
+        
+        'index.html': """{% extends 'base.html' %}
+
+{% block title %}{{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="jumbotron bg-light p-5 rounded">
+    <h1 class="display-4">Welcome to {{ app_name }}</h1>
+    <p class="lead">A secure platform for malware analysis and detonation.</p>
+    <hr class="my-4">
+    <p>Use the navigation bar above to access different features of the platform.</p>
+    {% if not current_user.is_authenticated %}
+    <a class="btn btn-primary btn-lg" href="{{ url_for('web.login') }}" role="button">Login</a>
+    {% else %}
+    <a class="btn btn-primary btn-lg" href="{{ url_for('web.dashboard') }}" role="button">Go to Dashboard</a>
+    {% endif %}
+</div>
+
+<div class="row mt-5">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-virus fa-3x mb-3 text-primary"></i>
+                <h5 class="card-title">Malware Analysis</h5>
+                <p class="card-text">Upload and analyze malware samples securely.</p>
+                <a href="{{ url_for('malware.index') }}" class="btn btn-outline-primary">Analyze Malware</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-flask fa-3x mb-3 text-primary"></i>
+                <h5 class="card-title">Detonation Services</h5>
+                <p class="card-text">Detonate samples in an isolated environment.</p>
+                <a href="{{ url_for('detonation.index') }}" class="btn btn-outline-primary">Detonation Zone</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-chart-line fa-3x mb-3 text-primary"></i>
+                <h5 class="card-title">Visualizations</h5>
+                <p class="card-text">Visualize data and create reports.</p>
+                <a href="{{ url_for('viz.index') }}" class="btn btn-outline-primary">View Analytics</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-wrench fa-2x mb-3 text-primary"></i>
+                <h5 class="card-title">Diagnostics</h5>
+                <p class="card-text">Check system status and troubleshoot issues.</p>
+                <a href="{{ url_for('web.diagnostic') }}" class="btn btn-outline-primary">System Diagnostics</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}""",
         
         'login.html': """{% extends 'base.html' %}
 
@@ -1233,15 +1361,17 @@ def generate_base_templates():
     
     try:
         # Create templates directory
-        os.makedirs('templates', exist_ok=True)
+        template_dir = os.path.join(current_app.root_path, 'templates')
+        os.makedirs(template_dir, exist_ok=True)
         
-        # Generate templates if they don't exist or are too small
+        # Generate templates
         for template_name, template_content in templates_to_generate.items():
-            template_path = f'templates/{template_name}'
+            template_path = os.path.join(template_dir, template_name)
             needs_create = False
             
             if not os.path.exists(template_path):
                 needs_create = True
+                logger.info(f"Template {template_name} doesn't exist, creating it")
             else:
                 # Check if template is too small
                 try:
@@ -1249,8 +1379,10 @@ def generate_base_templates():
                         content = f.read()
                     if len(content) < 100:  # Too small to be a proper template
                         needs_create = True
-                except Exception:
+                        logger.info(f"Template {template_name} is too small ({len(content)} bytes), recreating it")
+                except Exception as e:
                     needs_create = True
+                    logger.error(f"Error reading template {template_name}: {e}, will recreate it")
             
             if needs_create:
                 with open(template_path, 'w') as f:
@@ -1260,3 +1392,4 @@ def generate_base_templates():
         logger.info("All templates generated successfully")
     except Exception as e:
         logger.error(f"Error generating templates: {e}")
+        logger.error(traceback.format_exc())
