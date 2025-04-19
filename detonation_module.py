@@ -376,54 +376,68 @@ def deploy_vm_for_detonation(job_id, job_uuid, sample, vm_type):
     
     template_url = instance_templates.get(vm_type, instance_templates['windows-10-x64'])
     
-    # Create the VM
+    # Create the VM using proper API methods
     instance_client = compute_v1.InstancesClient()
     
     # Create instance with metadata
-    instance_props = {
-        "name": vm_name,
-        "metadata": {
-            "items": [
-                {"key": "job-uuid", "value": job_uuid},
-                {"key": "sample-sha256", "value": sample['sha256']},
-                {"key": "sample-path", "value": sample['storage_path']},
-                {"key": "results-bucket", "value": current_app.config['GCP_RESULTS_BUCKET']},
-                {"key": "job-id", "value": str(job_id)},
-                {"key": "detonation-timeout", "value": str(current_app.config.get('DETONATION_TIMEOUT_MINUTES', 30))},
-                {"key": "project-id", "value": project_id},
-                {"key": "shutdown-script", "value": create_shutdown_script()},
-                {"key": "health-check-interval", "value": "60"},
-            ]
-        },
-        "labels": {
-            "purpose": "malware-detonation",
-            "job-id": str(job_id),
-            "vm-type": vm_type.replace('-', '_'),
-            "created-by": "huntcraft",
-            "auto-delete": "true"
-        },
-        "scheduling": {
-            "automaticRestart": False,
-            "preemptible": current_app.config.get('USE_PREEMPTIBLE_VMS', False)
-        }
-    }
+    metadata_items = [
+        {"key": "job-uuid", "value": job_uuid},
+        {"key": "sample-sha256", "value": sample['sha256']},
+        {"key": "sample-path", "value": sample['storage_path']},
+        {"key": "results-bucket", "value": current_app.config['GCP_RESULTS_BUCKET']},
+        {"key": "job-id", "value": str(job_id)},
+        {"key": "detonation-timeout", "value": str(current_app.config.get('DETONATION_TIMEOUT_MINUTES', 30))},
+        {"key": "project-id", "value": project_id},
+        {"key": "shutdown-script", "value": create_shutdown_script()},
+        {"key": "health-check-interval", "value": "60"}
+    ]
     
     # Create and start the VM with retry logic
     retry_attempts = 3
     for attempt in range(retry_attempts):
         try:
             logger.info(f"Deploying VM {vm_name} (attempt {attempt+1}/{retry_attempts})")
-            operation = instance_client.insert_with_template(
-                project=project_id,
-                zone=zone,
-                instance_resource=instance_props,
-                source_instance_template=template_url
-            )
+            
+            # Create the request with source template
+            request = compute_v1.InsertInstanceRequest()
+            request.project = project_id
+            request.zone = zone
+            request.source_instance_template = template_url
+            
+            # Add instance-specific settings
+            request.instance_resource = compute_v1.Instance()
+            request.instance_resource.name = vm_name
+            
+            # Add metadata
+            request.instance_resource.metadata = compute_v1.Metadata()
+            request.instance_resource.metadata.items = []
+            
+            for item in metadata_items:
+                metadata_item = compute_v1.Metadata.Item()
+                metadata_item.key = item["key"]
+                metadata_item.value = item["value"]
+                request.instance_resource.metadata.items.append(metadata_item)
+            
+            # Add labels
+            request.instance_resource.labels = {
+                "purpose": "malware-detonation",
+                "job-id": str(job_id),
+                "vm-type": vm_type.replace('-', '_'),
+                "created-by": "huntcraft",
+                "auto-delete": "true"
+            }
+            
+            # Execute the request
+            operation = instance_client.insert(request=request)
             
             # Check for immediate errors
-            if operation.error:
-                error_messages = [error.message for error in operation.error.errors]
-                raise Exception(f"VM creation failed: {', '.join(error_messages)}")
+            if hasattr(operation, 'error') and operation.error:
+                error_messages = []
+                for error in operation.error.errors:
+                    if hasattr(error, 'message'):
+                        error_messages.append(error.message)
+                if error_messages:
+                    raise Exception(f"VM creation failed: {', '.join(error_messages)}")
             
             # Set up job monitoring, update status, and schedule cleanup
             setup_job_monitoring(job_id, vm_name)
