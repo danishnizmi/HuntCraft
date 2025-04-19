@@ -47,28 +47,32 @@ steps:
           echo "Service account already exists: malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
         fi
         
-        # Grant necessary permissions
+        # Grant necessary permissions - FIX: add --condition=None flag
         echo "Granting IAM permissions to service account: malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com"
         
         # Storage Admin role for bucket access
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/storage.admin"
+          --role="roles/storage.admin" \
+          --condition=None
           
         # PubSub Publisher role
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/pubsub.publisher"
+          --role="roles/pubsub.publisher" \
+          --condition=None
           
         # PubSub Subscriber role
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/pubsub.subscriber"
+          --role="roles/pubsub.subscriber" \
+          --condition=None
 
         # Compute Admin role (for VM management)
         gcloud projects add-iam-policy-binding $PROJECT_ID \
           --member="serviceAccount:malware-platform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-          --role="roles/compute.admin"
+          --role="roles/compute.admin" \
+          --condition=None
           
         # Create PubSub topic for detonation notifications if it doesn't exist
         if ! gcloud pubsub topics describe detonation-notifications &>/dev/null; then
@@ -85,6 +89,10 @@ steps:
         else
           echo "PubSub subscription already exists: detonation-app-sub"
         fi
+        
+        # Wait for IAM permissions to propagate
+        echo "Waiting 30 seconds for IAM permissions to propagate..."
+        sleep 30
         
         # Create VM instance templates
         if ! gcloud compute instance-templates describe detonation-win10-template &>/dev/null; then
