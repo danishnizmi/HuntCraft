@@ -25,7 +25,7 @@ steps:
         
         echo "Cloud Build permissions setup complete"
 
-  # Setup infrastructure before build
+  # Setup infrastructure before build - FIXED for storage bucket issues
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'infrastructure-setup'
     entrypoint: 'bash'
@@ -34,10 +34,56 @@ steps:
       - |
         echo "Setting up required infrastructure..."
         
-        # Create required storage buckets
+        # Create required storage buckets with improved error handling and validation
         echo "Creating storage buckets..."
-        gsutil mb -l ${_REGION} gs://malware-samples-$PROJECT_ID 2>/dev/null || echo "Bucket already exists"
-        gsutil mb -l ${_REGION} gs://detonation-results-$PROJECT_ID 2>/dev/null || echo "Bucket already exists"
+        
+        # Create malware samples bucket with full error logging
+        SAMPLE_BUCKET_NAME="malware-samples-$PROJECT_ID"
+        if ! gsutil ls -b gs://$SAMPLE_BUCKET_NAME > /dev/null 2>&1; then
+          echo "Creating malware samples bucket: $SAMPLE_BUCKET_NAME"
+          gsutil mb -l ${_REGION} gs://$SAMPLE_BUCKET_NAME || {
+            echo "ERROR: Failed to create malware samples bucket!"
+            exit 1
+          }
+          # Set default ACLs (private)
+          gsutil defacl set private gs://$SAMPLE_BUCKET_NAME
+          echo "Successfully created bucket: $SAMPLE_BUCKET_NAME"
+        else
+          echo "Bucket already exists: $SAMPLE_BUCKET_NAME"
+        fi
+        
+        # Create detonation results bucket with full error logging
+        RESULTS_BUCKET_NAME="detonation-results-$PROJECT_ID"
+        if ! gsutil ls -b gs://$RESULTS_BUCKET_NAME > /dev/null 2>&1; then
+          echo "Creating detonation results bucket: $RESULTS_BUCKET_NAME"
+          gsutil mb -l ${_REGION} gs://$RESULTS_BUCKET_NAME || {
+            echo "ERROR: Failed to create detonation results bucket!"
+            exit 1
+          }
+          # Set default ACLs (private)
+          gsutil defacl set private gs://$RESULTS_BUCKET_NAME
+          echo "Successfully created bucket: $RESULTS_BUCKET_NAME"
+        else
+          echo "Bucket already exists: $RESULTS_BUCKET_NAME"
+        fi
+        
+        # Verify bucket access (critical test)
+        echo "Verifying bucket access..."
+        for BUCKET in $SAMPLE_BUCKET_NAME $RESULTS_BUCKET_NAME; do
+          echo "Testing access to: $BUCKET"
+          if ! gsutil ls -b gs://$BUCKET > /dev/null 2>&1; then
+            echo "ERROR: Cannot access bucket $BUCKET after creation!"
+            exit 1
+          fi
+          # Write test file to confirm write permissions
+          echo "test" | gsutil cp - gs://$BUCKET/test_access.txt || {
+            echo "ERROR: Cannot write to bucket $BUCKET!"
+            exit 1
+          }
+          # Delete test file
+          gsutil rm gs://$BUCKET/test_access.txt > /dev/null 2>&1
+          echo "Successfully verified access to $BUCKET"
+        done
         
         # Create Pub/Sub topic and subscription for notifications
         echo "Setting up Pub/Sub..."
@@ -152,6 +198,10 @@ steps:
                   value: "$PROJECT_ID"
                 - name: GCP_REGION
                   value: "${_REGION}"
+                - name: GCP_STORAGE_BUCKET
+                  value: "malware-samples-$PROJECT_ID"
+                - name: GCP_RESULTS_BUCKET
+                  value: "detonation-results-$PROJECT_ID"
                 - name: MAX_CONCURRENT_DETONATIONS
                   value: "3"
         EOF
@@ -199,8 +249,15 @@ steps:
         echo "Service URL Info:"
         gcloud run services describe malware-detonation-platform --region=${_REGION} --format='value(status.url)' 2>/dev/null || echo "Service URL not available"
         
-        # No health check to avoid variables
-        echo "Deployment verification complete"
+        # Check storage buckets are accessible from the deployed service
+        echo "Verifying storage bucket access from service..."
+        SAMPLE_BUCKET="malware-samples-$PROJECT_ID"
+        RESULTS_BUCKET="detonation-results-$PROJECT_ID"
+        
+        # Print confirmation that buckets exist
+        echo "Storage Buckets:"
+        echo "- Malware samples: gs://$SAMPLE_BUCKET"
+        echo "- Detonation results: gs://$RESULTS_BUCKET"
         
         # Final deployment message
         echo "====================================="
